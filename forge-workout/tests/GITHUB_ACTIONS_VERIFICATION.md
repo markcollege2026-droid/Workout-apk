@@ -1,18 +1,16 @@
-# GitHub Actions workflow verification
+# Completed GitHub Actions verification
 
-## Local checks
+A real GitHub-hosted build completed successfully.
 
-- `actionlint` 1.7.12: passed, no diagnostics.
-- Workflow YAML parsing: passed.
-- Bash syntax checks for all 7 run steps: passed.
-- Both embedded Python scripts parse: passed.
-- All five referenced action repositories/commit SHAs were resolved from live public Git tags and their action metadata was read before pinning them.
-- Actual ZIP-only bootstrap execution: safely extracted the new GitHub ZIP and located the app; the original source ZIP route also passed.
-- Current workout-engine tests: 42 passed, 0 failed.
-- Workflow invokes the same SDK-only native build script used to produce the previously signature-verified APK.
+- Run: https://github.com/markcollege2026-droid/Workout-apk/actions/runs/38279070156
+- Built source commit: `b81e0361b3de42134f25541771cfe7078c5aae3d`
+- Workflow: repository-root `.github/workflows/forge-build-apk.yml`
+- 42 engine tests passed, 0 failed.
+- Android SDK 35/build tools 35.0.0 compilation, alignment, APK v2/v3 signature validation, offline assets, and timer WAV checks passed.
+- APK SHA-256: `2b70e0a529d49c72bdcf8a483dc3c840b8a219236af0d9017de02e47ca71601d`
+- Downloaded artifact checksum verified locally; signing certificate matches the earlier personal APK.
+- Private signing key stored only in the encrypted `FORGE_WORKOUT_KEYSTORE_B64` Actions secret, not public source.
 
-## Status and limits
+Prior local workflow checks also passed: actionlint 1.7.12, seven shell-script syntax checks, embedded Python parsing, and source ZIP bootstrap tests.
 
-This is a prepared workflow, **not a completed GitHub-hosted build**. No repository was created or modified, no workflow was dispatched, and no remote artifact URL exists from this chat. The GitHub connector returned unsupported. Upload/push the supplied project to your own repository to start the run.
-
-The workflow runs engine tests, compiles/signs a fresh APK, checks alignment/permissions/assets, and uploads that APK with verification/provenance files. It does not run browser UI or physical Android timer tests.
+This pipeline does not run browser UI or physical Android timer tests. Screen-off cues still need the included phone smoke check. Existing main-branch files were preserved; app source and workflow are on `forge/apk-build-20261012`.
