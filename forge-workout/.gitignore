@@ -1,0 +1,18 @@
+node_modules/
+build/
+.cache/
+.arena/
+.DS_Store
+local.properties
+tests/artifacts/failure.png
+
+# Build output belongs in Actions artifacts, not in repository source.
+release/
+tests/artifacts/
+tests/ci-*.txt
+ci-unpacked/
+
+# Signing material is restored from an Actions secret, never public source.
+signing/*.keystore
+signing/*.jks
+signing/*.p12

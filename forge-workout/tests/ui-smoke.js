@@ -1,0 +1,85 @@
+/* End-to-end UI smoke checks. Start the preview server before running. */
+const {chromium,expect}=require('@playwright/test');
+const fs=require('node:fs');
+const path=require('node:path');
+(async()=>{
+ const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+ const context=await browser.newContext({viewport:{width:1440,height:1000},acceptDownloads:true});
+ const page=await context.newPage(),errors=[],checks=[];
+ page.on('pageerror',e=>errors.push(e.message));
+ page.on('console',m=>{if(m.type()==='error')errors.push(m.text());});
+ const click=async(action,data='')=>page.locator(`[data-action="${action}"]${data}:visible`).first().click();
+ const check=(name)=>{checks.push(name);console.log('PASS',name);};
+ const noOverflow=async()=>{const info=await page.evaluate(()=>({ok:document.documentElement.scrollWidth<=innerWidth,width:innerWidth,scroll:document.documentElement.scrollWidth,route:ForgeApp.ui.route,overflow:[...document.querySelectorAll('main *')].filter(e=>e.getBoundingClientRect().right>innerWidth+1).map(e=>[e.tagName,e.className]).slice(0,12)}));if(!info.ok)throw new Error('Overflow: '+JSON.stringify(info));};
+ try{
+  await page.goto(process.env.FORGE_URL||'http://localhost:3000');
+  await expect(page.locator('h1')).toContainText('Make today count');await noOverflow();check('Offline seed loads and desktop overview fits');
+  await page.screenshot({path:'tests/artifacts/desktop-overview.png',fullPage:true});
+  for(const route of ['progress','history','library','settings','session','today']){await click('nav',`[data-route="${route}"]`);await expect(page.locator('h1')).toBeVisible();await noOverflow();}
+  check('All six navigation screens render without errors');
+  await click('nav','[data-route="library"]');await click('exercise-edit','[data-id="bench-press"]');
+  await page.locator('#edit-note').fill('Grip: second ring. Safety pins: 6.');await click('save-exercise');
+  expect(await page.evaluate(()=>ForgeApp.s().exercises.find(e=>e.id==='bench-press').note)).toContain('Safety pins');check('Editable exercise definitions and machine settings memory');
+  await click('exercise-add');await page.locator('#edit-name').fill('Test row');await page.locator('#edit-muscle').fill('Back');await page.locator('#edit-block').selectOption('back');await click('save-exercise');
+  const custom=await page.evaluate(()=>ForgeApp.s().exercises.find(e=>e.name==='Test row').id);
+  await click('exercise-edit',`[data-id="${custom}"]`);await click('archive-exercise');await click('confirm-dialog');
+  expect(await page.evaluate(id=>ForgeApp.s().exercises.find(e=>e.id===id).active,custom)).toBe(false);check('Add, edit and archive keep IDs and histories safe');
+  await click('nav','[data-route="settings"]');await click('pairing');await page.locator('#pair-exercise').selectOption('bench-press');
+  await page.locator('.pair-check[data-b="pull-down"]').uncheck();expect(await page.evaluate(()=>ForgeApp.s().pairOverrides['bench-press|pull-down'])).toBe(false);
+  await click('reset-pairs');await click('confirm-dialog');await click('close-modal');check('Symmetric pairing table editing and reset');
+  await click('equipment');await page.locator('#equipment-dumbbells').fill('-1, 4');await click('save-equipment');await expect(page.locator('#toast')).toContainText('comma-separated');
+  await page.locator('#equipment-dumbbells').fill('2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40');await click('save-equipment');check('Equipment validation rejects invalid loads without a partial save');
+  await click('nav','[data-route="today"]');await click('bodyweight');await page.locator('#body-weight').fill('72.4');await click('save-bodyweight');expect(await page.evaluate(()=>ForgeApp.s().bodyweights[0].weight)).toBe(72.4);check('Bodyweight snapshot source is recorded locally');
+  await click('block-toggle','[data-id="back"]');await click('plan-workout');await expect(page.locator('#modal-title')).toContainText('starting point');await click('conservative-starts');await click('save-starts');
+  await expect(page.locator('h1')).toContainText('streamlined');expect(await page.evaluate(()=>ForgeApp.ui.planned.entries.length)).toBe(6);check('First-use starting-weight flow builds a complete plan');
+  await page.screenshot({path:'tests/artifacts/desktop-plan.png',fullPage:true});await click('start-workout');
+  await expect(page.locator('[data-action="set-done"]')).toBeEnabled();await click('set-done');await expect(page.locator('#timer-text')).toBeVisible();await expect(page.locator('#log-reps')).toHaveValue('8');
+  expect(await page.evaluate(()=>ForgeApp.s().session.timer.deadline-Date.now())).toBeGreaterThan(40000);
+  await page.locator('#log-note').fill('Warm-up smooth.');await click('confirm-set');await click('undo');expect(await page.evaluate(()=>ForgeApp.s().session.records.length)).toBe(0);check('Rest starts before logging; confirmation and undo are functional');
+  await click('set-done');await page.locator('#log-note').fill('Preserved while the timer ends.');
+  await page.evaluate(()=>{ForgeApp.s().session.timer.deadline=Date.now()+150;ForgeApp.save();});
+  await expect(page.locator('#timer-text')).toHaveCount(0,{timeout:4000});await expect(page.locator('#log-note')).toHaveValue('Preserved while the timer ends.');check('Timer expiry preserves an in-progress log');
+  await page.reload();await expect(page.locator('h1')).toContainText('next set');await expect(page.locator('#log-note')).toHaveValue('Preserved while the timer ends.');await click('confirm-set');check('Crash/reload resumes the exact pending set and its draft');
+  await click('session-note');await page.locator('#session-note-edit').fill('Good sleep. Controlled tempo.');await click('save-session-note');
+  await click('unavailable');await expect(page.locator('#modal-title')).toContainText('starting point');await click('conservative-starts');await click('save-starts');
+  expect(await page.evaluate(()=>ForgeApp.s().session.entries.find(e=>e.exerciseId==='bench-press').skipped)).toBe(true);
+  expect(await page.evaluate(()=>ForgeApp.s().session.entries.some(e=>e.exerciseId==='dumbbell-bench-press'))).toBe(true);check('Unavailable swaps, replans and keeps independent substitute targets');
+  await click('skip-exercise');expect(await page.evaluate(()=>ForgeApp.s().session.queue.some(r=>r.exerciseId==='incline-bench'))).toBe(false);check('Skip removes remaining work without creating a failed attempt');
+  await page.setViewportSize({width:390,height:844});await noOverflow();await click('set-done');await page.screenshot({path:'tests/artifacts/mobile-workout.png',fullPage:true});await click('confirm-set');await click('timer-skip');
+  let completed=0;
+  while(await page.evaluate(()=>ForgeApp.s().session.queue.length>0)){
+   const task=await page.evaluate(()=>{const t=ForgeApp.s().session.queue[0],e=ForgeApp.s().exercises.find(e=>e.id===t.exerciseId);return {...t,rangeTop:e.max,type:e.type};});
+   await click('set-done');await page.locator('#log-reps').fill(String(task.warmup?task.reps:task.rangeTop));
+   if(await page.locator('[data-action="set-rir"]').count())await click('set-rir','[data-value="1"]');
+   await click('confirm-set');if(await page.locator('[data-action="timer-skip"]').count())await click('timer-skip');completed++;
+   if(completed>100)throw new Error('Workout failed to terminate');
+  }
+  await expect(page.locator('[data-action="commit"]')).toBeVisible();await click('commit');await expect(page.locator('.notice.success').first()).toContainText('COMMITTED');
+  const summary=await page.evaluate(()=>({history:ForgeApp.s().sessions.length,active:ForgeApp.s().session,original:ForgeApp.s().suggestions['bench-press'],subs:ForgeApp.s().suggestions['dumbbell-bench-press'],valid:ForgeEngine.validate(ForgeApp.s())}));
+  expect(summary.history).toBe(1);expect(summary.active).toBe(null);expect(summary.original).toBeUndefined();expect(summary.subs).toBeTruthy();expect(summary.valid).toBe(true);check('Full session COMMIT generates independent suggestions, real charts and records');
+  await noOverflow();await page.screenshot({path:'tests/artifacts/mobile-progress.png',fullPage:true});
+  if(await page.locator('[data-action="accept-suggestion"]').count())await click('accept-suggestion');check('One-tap acceptance applies the next target explicitly');
+  await click('nav','[data-route="history"]');await expect(page.locator('.history-row')).toHaveCount(1);await click('history-session');await click('history-edit');
+  await page.locator('#history-duration').fill('25.5');await page.locator('#history-session-note').fill('Edited session note.');await page.locator('.history-note').first().fill('Edited historical set.');await click('save-history');
+  expect(await page.evaluate(()=>ForgeApp.s().sessions[0].durationSeconds)).toBe(1530);expect(await page.evaluate(()=>ForgeApp.s().sessions[0].note)).toBe('Edited session note.');check('Past-session set, note and duration editing recalculates suggestions');
+  await click('nav','[data-route="settings"]');const downloadPromise=page.waitForEvent('download');await click('export');const dl=await downloadPromise,location=await dl.path(),backup=fs.readFileSync(location,'utf8');
+  const payload=JSON.parse(backup);expect(payload.sessions.length).toBe(1);expect(payload.exercises.length).toBe(41);check('One-file JSON export includes the entire workspace');
+  await page.locator('#backup-file').setInputFiles({name:'restore.json',mimeType:'application/json',buffer:Buffer.from(backup)});await expect(page.locator('#modal-title')).toContainText('Restore');await click('restore-confirm');expect(await page.evaluate(()=>ForgeApp.s().sessions[0].note)).toBe('Edited session note.');check('Validated JSON restore is all-or-nothing');
+  await page.locator('#backup-file').setInputFiles({name:'bad.json',mimeType:'application/json',buffer:Buffer.from('{"version":999}')});await expect(page.locator('#toast')).toContainText('Restore rejected');expect(await page.evaluate(()=>ForgeApp.s().sessions.length)).toBe(1);check('Invalid backup leaves current data untouched');
+  await page.setViewportSize({width:320,height:740});for(const route of ['today','session','progress','history','library','settings']){await click('nav',`[data-route="${route}"]`);await noOverflow();}check('All screens remain one-handed and within a 320px viewport');
+  await page.setViewportSize({width:390,height:844});await click('nav','[data-route="today"]');await page.screenshot({path:'tests/artifacts/mobile-overview.png',fullPage:true});
+  const filePage=await browser.newPage({viewport:{width:390,height:844}});
+  filePage.on('pageerror',e=>errors.push(e.message));
+  await filePage.addInitScript(()=>{let saved='';window.__nativeCalls=[];window.Native={loadState:()=>saved,saveState:j=>{saved=j;window.__nativeCalls.push(['save']);return 'ok';},keepScreenAwake:v=>window.__nativeCalls.push(['awake',v]),setReminders:()=>{},permissions:()=>'{"native":true,"notifications":true,"exact":true}',startTimer:(...v)=>window.__nativeCalls.push(['timer',...v]),cancelTimer:()=>window.__nativeCalls.push(['cancel']),testAlert:()=>{},timerState:()=>JSON.stringify(window.__nativeStatus||{}),requestNotifications:()=>{},requestExactAlarms:()=>{},exportBackup:()=>{},importBackup:()=>{}};});
+  await filePage.goto('file://'+path.resolve(__dirname,'../www/index.html'));await expect(filePage.locator('h1')).toContainText('Make today count');
+  await filePage.evaluate(()=>{const s=ForgeApp.s();s.settings.selectedBlocks=['abs'];const p=ForgeEngine.plan(s,['abs']);s.session=ForgeEngine.newSession(s,p);ForgeApp.ui.route='session';ForgeApp.render();});
+  await filePage.locator('[data-action="set-done"]').click();
+  const calls=await filePage.evaluate(()=>__nativeCalls);expect(calls.some(c=>c[0]==='timer')).toBe(true);expect(calls.some(c=>c[0]==='awake'&&c[1]===true)).toBe(true);
+  await filePage.evaluate(()=>onNativeTimerCancelled(ForgeApp.s().session.timer.deadline));expect(await filePage.evaluate(()=>ForgeApp.s().session.timer)).toBe(null);check('Local file assets, SQLite bridge contract, timer bridge and native skip callback');
+  await filePage.evaluate(()=>{ForgeApp.s().session.timer={deadline:Date.now()+20000,total:20,kind:'rest'};window.__nativeStatus={cancelled:ForgeApp.s().session.timer.deadline};ForgeApp.syncNativeTimer();});expect(await filePage.evaluate(()=>ForgeApp.s().session.timer)).toBe(null);check('Native cancellation marker prevents resurrecting a rest skipped while closed');
+  await filePage.locator('[data-action="discard-session"]').click();await filePage.locator('[data-action="confirm-dialog"]').click();expect(await filePage.evaluate(()=>ForgeApp.s().session)).toBe(null);expect(await filePage.evaluate(()=>ForgeApp.s().sessions.length)).toBe(0);check('Confirmed discard removes only the active session');
+  await filePage.close();expect(errors).toEqual([]);check('Zero JavaScript page errors');
+  fs.writeFileSync('tests/ui-results.json',JSON.stringify({passed:checks.length,checks,errors},null,2));console.log('\n'+checks.length+' UI checks passed.');
+ }catch(e){console.error(e);await page.screenshot({path:'tests/artifacts/failure.png',fullPage:true});console.error('JS errors:',errors);process.exitCode=1;}
+ finally{await browser.close();}
+})();

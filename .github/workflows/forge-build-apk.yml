@@ -1,0 +1,204 @@
+name: Build Forge APK
+
+# Put this workflow at the repository root; upload app files or the supplied source ZIP.
+# This builds from source; it does not upload the APK supplied in the earlier ZIP.
+"on":
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forge-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Test, compile, and sign Android APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Locate or unpack the app
+        id: project
+        run: |
+          set -euo pipefail
+          find_project() {
+            for dir in "$@"; do
+              if [[ -f "$dir/scripts/build-apk.sh" && -f "$dir/package-lock.json" && -f "$dir/android/app/src/main/AndroidManifest.xml" ]]; then
+                echo "dir=$dir" >> "$GITHUB_OUTPUT"
+                return 0
+              fi
+            done
+            return 1
+          }
+          if find_project . forge-workout; then
+            exit 0
+          fi
+          # Phone/browser-friendly route: upload just the source ZIP plus this workflow.
+          python3 - <<'PY'
+          from pathlib import Path
+          import zipfile
+          source = next((Path(name) for name in ('Forge-GitHub-Actions.zip', 'Forge-Workout-Source.zip') if Path(name).is_file()), None)
+          if source is None:
+              raise SystemExit('::error::Upload Forge-GitHub-Actions.zip, or upload the extracted app source to the repository root.')
+          destination = Path('ci-unpacked').resolve()
+          destination.mkdir(parents=True, exist_ok=True)
+          with zipfile.ZipFile(source) as archive:
+              for member in archive.infolist():
+                  try:
+                      (destination / member.filename).resolve().relative_to(destination)
+                  except ValueError:
+                      raise SystemExit('::error::Source ZIP contains an unsafe path.')
+              archive.extractall(destination)
+          print('Unpacked source:', source.name)
+          PY
+          if find_project ci-unpacked/forge-workout ci-unpacked; then
+            exit 0
+          fi
+          echo "::error::App source not found inside the ZIP. Expected scripts/build-apk.sh, package-lock.json, and android/app/src/main/AndroidManifest.xml."
+          exit 1
+
+      - name: Set up Java 17
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Node 22
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: ${{ steps.project.outputs.dir }}/package-lock.json
+
+      - name: Set up Android command-line tools
+        uses: android-actions/setup-android@be39fa834029ff78f1a44aa3bb0819b8fc2bd8fd # v4
+        with:
+          # Same SDK command-line tools used for the original successful build.
+          cmdline-tools-version: '11076708'
+          accept-android-sdk-licenses: 'true'
+          log-accepted-android-sdk-licenses: 'false'
+          packages: 'platform-tools'
+
+      - name: Install the exact Android SDK packages
+        run: |
+          set -euo pipefail
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+
+      - name: Install build dependencies and regenerate offline assets
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run bundle
+
+      - name: Run workout-engine tests
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          set -euo pipefail
+          npm test
+
+      - name: Restore the APK signing key from Actions secret
+        working-directory: ${{ steps.project.outputs.dir }}
+        env:
+          FORGE_KEYSTORE_B64: ${{ secrets.FORGE_WORKOUT_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$FORGE_KEYSTORE_B64" ]]; then
+            echo "::error::Missing FORGE_WORKOUT_KEYSTORE_B64 repository secret."
+            exit 1
+          fi
+          mkdir -p signing
+          chmod 700 signing
+          printf '%s' "$FORGE_KEYSTORE_B64" | base64 --decode > signing/forge-debug.keystore
+          chmod 600 signing/forge-debug.keystore
+
+      - name: Compile and sign a fresh APK
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          set -euo pipefail
+          # Refuse to silently generate a new signing key on every run.
+          # The key restored from the secret matches the previously supplied APK.
+          if [[ ! -f signing/forge-debug.keystore ]]; then
+            echo "::error::Missing signing/forge-debug.keystore. Restore the signing secret so updates preserve the app's signing identity."
+            exit 1
+          fi
+          rm -rf release
+          bash scripts/build-apk.sh
+
+      - name: Verify APK, offline permissions, and provenance
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          : "${SDK:?Android SDK environment is missing}"
+          BT="$SDK/build-tools/35.0.0"
+          "$BT/apksigner" verify --verbose --print-certs release/Forge-Workout.apk | tee release/apk-signature.txt
+          "$BT/zipalign" -c 4 release/Forge-Workout.apk
+          "$BT/aapt2" dump badging release/Forge-Workout.apk > release/apk-manifest.txt
+          if grep -Fq "uses-permission: name='android.permission.INTERNET'" release/apk-manifest.txt; then
+            echo "::error::Unexpected INTERNET permission. This app must stay offline."
+            exit 1
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, os, zipfile
+          apk = Path('release/Forge-Workout.apk')
+          with zipfile.ZipFile(apk) as archive:
+              assert 'classes.dex' in archive.namelist(), 'Compiled Android code is missing'
+              assert 'assets/www/forge.js' in archive.namelist(), 'Offline UI bundle is missing'
+              assert archive.getinfo('res/raw/complete.wav').compress_type == 0, 'Timer sound must be stored uncompressed'
+          digest = hashlib.sha256(apk.read_bytes()).hexdigest()
+          Path('release/SHA256SUMS.txt').write_text(digest + '  Forge-Workout.apk\n')
+          Path('release/build-details.txt').write_text(
+              'Forge Android build\n'
+              + 'Commit: ' + os.environ['GITHUB_SHA'] + '\n'
+              + 'Run: ' + os.environ['GITHUB_RUN_ID'] + '\n'
+              + 'Source: ' + os.environ['GITHUB_SERVER_URL'] + '/' + os.environ['GITHUB_REPOSITORY'] + '\n'
+              + 'Android minimum API: 26; compile/target API: 35; build tools: 35.0.0\n'
+              + 'Signing: personal-use debug key restored from Actions secret\n'
+              + 'APK SHA-256: ' + digest + '\n'
+          )
+          print('Verified APK SHA-256:', digest)
+          PY
+
+      - name: Save the APK as a downloadable artifact
+        id: apk
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: Forge-Workout-APK
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          archive: true
+          path: |
+            ${{ steps.project.outputs.dir }}/release/Forge-Workout.apk
+            ${{ steps.project.outputs.dir }}/release/SHA256SUMS.txt
+            ${{ steps.project.outputs.dir }}/release/apk-signature.txt
+            ${{ steps.project.outputs.dir }}/release/apk-manifest.txt
+            ${{ steps.project.outputs.dir }}/release/build-details.txt
+
+      - name: Add the download link to the run summary
+        env:
+          APK_ARTIFACT_URL: ${{ steps.apk.outputs.artifact-url }}
+        run: |
+          {
+            echo '## Forge APK is ready'
+            echo
+            printf '[Download Forge-Workout-APK](%s)\n' "$APK_ARTIFACT_URL"
+            echo
+            echo 'Extract the artifact ZIP and install Forge-Workout.apk on Android 8.0+.'
+            echo 'The artifact also includes its checksum, signature, manifest, and source commit.'
+            echo
+            echo 'Compilation is not a physical-device timer test. Verify screen-off sound and vibration on your phone before gym use.'
+          } >> "$GITHUB_STEP_SUMMARY"
