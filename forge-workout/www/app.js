@@ -54,7 +54,16 @@ const commitActual=()=>{
   A.save();A.navigate('progress');A.toast('COMMITTED. Every set is saved.');
 };
 const recomputeSuggestions=()=>{
-  const s=A.s();for(const e of s.exercises){const last=E.exerciseHistory(s,e.id).pop();if(last){const sug=E.suggestion(s,e,last.session);if(sug)s.suggestions[e.id]=sug;}}
+  const s=A.s();for(const e of s.exercises){
+    const last=E.exerciseHistory(s,e.id).pop();
+    if(!last){delete s.suggestions[e.id];continue;}
+    const sug=E.suggestion(s,e,last.session);if(!sug)continue;
+    const prev=s.suggestions[e.id];
+    // An identical recompute of an already accepted proposal keeps the explicit acceptance;
+    // a changed proposal is a new decision and correctly returns for review.
+    if(prev&&prev.accepted&&prev.sessionId===sug.sessionId&&prev.kind===sug.kind&&prev.weight===sug.weight&&prev.reps===sug.reps)sug.accepted=true;
+    s.suggestions[e.id]=sug;
+  }
 };
 A.importData=text=>{
   try{
@@ -139,6 +148,7 @@ const actions={
     document.querySelectorAll('.history-failed').forEach(el=>{const r=recs[Number(el.dataset.index)];r.failed=el.checked||r.reps<r.min;});
     document.querySelectorAll('.history-rir').forEach(el=>recs[Number(el.dataset.index)].rir=el.value===''?null:Number(el.value));
     const startedAt=new Date($('history-date-edit').value).getTime();if(!Number.isFinite(startedAt))throw new Error('Invalid session date.');
+    if(startedAt>Date.now())throw new Error('Choose a session date up to today.');
     const durationSeconds=Math.round(n('history-duration',0,1440)*60);
     sess.records=recs;sess.startedAt=startedAt;sess.durationSeconds=durationSeconds;sess.endedAt=startedAt+durationSeconds*1000;sess.note=$('history-session-note').value.slice(0,5000);
     A.s().sessions.sort((a,b)=>a.startedAt-b.startedAt);recomputeSuggestions();A.save();A.close();A.render();A.toast('Session updated. Suggestions recalculated; accepted targets stay under your control.',5500);

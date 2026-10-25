@@ -101,12 +101,26 @@ jobs:
           set -euo pipefail
           npm ci
           npm run bundle
+          # Fail when the checked-in offline bundle drifted from the readable sources.
+          git diff --exit-code -- www/forge.js
 
       - name: Run workout-engine tests
         working-directory: ${{ steps.project.outputs.dir }}
         run: |
           set -euo pipefail
           npm test
+
+      - name: Run browser UI smoke checks
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          set -euo pipefail
+          npx playwright install --with-deps chromium
+          mkdir -p tests/artifacts
+          python3 -m http.server 3000 --bind 127.0.0.1 --directory www >/dev/null 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          for _ in $(seq 1 50); do curl -sf http://127.0.0.1:3000/index.html >/dev/null && break; sleep 0.2; done
+          npm run test:ui
 
       - name: Restore the APK signing key from Actions secret
         working-directory: ${{ steps.project.outputs.dir }}

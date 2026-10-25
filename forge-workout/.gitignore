@@ -10,6 +10,7 @@ tests/artifacts/failure.png
 release/
 tests/artifacts/
 tests/ci-*.txt
+tests/ui-results.json
 ci-unpacked/
 
 # Signing material is restored from an Actions secret, never public source.

@@ -9,7 +9,7 @@ A complete personal-use, offline Android workout app built from your workout spe
 
 ## Build on GitHub Actions
 
-The workflow is at the repository root: **`.github/workflows/forge-build-apk.yml`**. Source lives in **`forge-workout/`**. A push on the build branch runs the workflow. Download **Forge-Workout-APK** from a successful run and extract **Forge-Workout.apk**.
+The workflow is at the repository root: **`.github/workflows/forge-build-apk.yml`**. Source lives in **`forge-workout/`**. A push on any branch runs the workflow: 45 engine tests, the 27-check headless browser UI smoke suite, a guard that fails when the checked-in `www/forge.js` bundle drifted from the readable sources, then the APK build and verification. Download **Forge-Workout-APK** from a successful run and extract **Forge-Workout.apk**.
 
 The matching APK signing key is restored from the **FORGE_WORKOUT_KEYSTORE_B64** Actions secret; it is not public source. Cloud compilation processes app code only, not your phone's workout data. See **GITHUB_ACTIONS.md** for this repository's build details.
 
@@ -159,11 +159,11 @@ Optional developer tools: Node 20+.
 
 ```bash
 npm ci
-npm run bundle    # REQUIRED after editing readable www/*.js sources
-npm test          # planner/progression/backup unit tests
+npm run bundle    # REQUIRED after editing readable www/*.js sources — CI fails on drift
+npm test          # 45 planner/progression/backup unit tests
 npx playwright install --with-deps chromium
 # With the preview server running in another terminal:
-npm run test:ui
+npm run test:ui   # 27 headless-browser checks (also runs in GitHub Actions)
 bash scripts/build-apk.sh
 ```
 
@@ -177,7 +177,7 @@ bash scripts/build-apk.sh
 - `www/storage.js`: private SQLite bridge on Android; localStorage in the preview.
 - `android/app/src/main/java/app/forge/workout/`: activity, transactional SQLite workspace repository, foreground timer, deduplicated alarm completion, and local reminders.
 - `scripts/`: SDK-only builds and optional JS transpilation.
-- `tests/`: 42 passing engine tests, 24 passing browser/UI/bridge-contract checks, and scope/verification report.
+- `tests/`: 45 passing engine tests, 27 passing browser/UI/bridge-contract checks, and scope/verification report.
 
 SQLite stores the complete versioned workspace document transactionally, plus one previous local revision. History is keyed by actual exercise IDs, not by substituted-original IDs. Android's automatic cloud backup/device transfer is excluded; backups happen only when you choose to export.
 
@@ -186,8 +186,9 @@ SQLite stores the complete versioned workspace document transactionally, plus on
 - Linux SDK 35 build completed; aapt2/d8 compilation succeeded.
 - APK alignment and v2/v3 signature verification passed.
 - APK manifest was inspected: **no Internet permission**.
-- **42 engine tests passed**, including all 63 nonempty block selections, pairing exceptions, unequal sets, triples, budget trimming, loadability, immediate timers, progression, failure/deload rules, substitution independence, analytics and backup validation.
-- **24 UI checks passed**: complete session workflow, drafts and reload, notes, edit/archive, independent substitutes, history editing, real charts, export/restore, malformed-backup rejection, 320px layouts, local-file assets, and mocked native bridge contracts. No JavaScript page errors.
+- **45 engine tests passed**, including all 63 nonempty block selections, pairing exceptions, unequal sets, triples, budget trimming, loadability, immediate timers, progression, failure/deload rules, substitution independence, undo after substitute/skip, warm-up-only session semantics, analytics and backup validation.
+- **27 UI checks passed**: complete session workflow, drafts and reload, notes, edit/archive, independent substitutes, history editing (including future-date rejection and accepted-suggestion preservation), real charts, export/restore, malformed-backup rejection, corrupt-storage recovery, 320px layouts, local-file assets, and mocked native bridge contracts. No JavaScript page errors.
+- **25 October 2026 functional-QA pass** fixed three defects with new regression tests: accepted suggestions were silently un-accepted by history edits, undo could resurrect tasks of skipped/substituted entries, and history editing accepted future session dates. GitHub Actions now also runs the headless UI smoke suite and fails on `www/forge.js` bundle drift. See the addendum in `tests/VERIFICATION.md`.
 - An Android emulator could not boot in the 2 GB, unaccelerated workspace. **No Android runtime, physical-device alert, Doze/reboot, OEM battery-policy, or Windows-build execution is claimed.** Perform the screen-off check above on your actual phone.
 
 ## Assumptions and interpretations

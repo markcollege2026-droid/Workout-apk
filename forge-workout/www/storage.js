@@ -17,8 +17,5 @@ store.permissions=function(){
   if(!native)return {notifications:false,exact:false,native:false};
   try{return JSON.parse(root.Native.permissions());}catch(e){return {native:true,notifications:false,exact:false};}
 };
-store.sync=function(){
-  if(native){root.Native.keepScreenAwake(!!store.state.session&&store.state.settings.keepAwake);root.Native.setReminders(JSON.stringify(store.state.settings.reminders));}
-};
 root.ForgeStore=store;
 })(window);

@@ -114,3 +114,42 @@ test('historical load/volume uses the logging type saved with the session',()=>{
  const s=state();s.bodyweights=[{date:'1970-01-01',weight:70}];history(s,'bench-press',[10],{weight:100,at:100000});get(s,'bench-press').type='bodyweight';
  assert.equal(E.stats(s,'bench-press').points[0].volume,1000);
 });
+test('undo after a substitute never resurrects tasks of the skipped entry',()=>{
+ const s=state();s.settings.warmups=false;
+ const p=E.plan(s,['chest','back']);s.session=E.newSession(s,p);
+ const rec=E.completeSet(s);rec.confirmed=true;s.session.pendingLogId=null;s.session.timer=null;
+ assert.equal(rec.exerciseId,'bench-press');
+ const bench=s.session.entries.find(en=>en.exerciseId==='bench-press');
+ const sub=E.substitute(s,bench.id);assert.equal(sub.error,undefined);
+ assert.equal(s.session.queue.some(t=>t.exerciseId==='bench-press'),false);
+ assert.equal(E.undoSet(s),true);
+ assert.equal(s.session.records.length,0);
+ assert.equal(s.session.queue.some(t=>t.exerciseId==='bench-press'),false,'skipped entry task must not re-enter the queue');
+ assert(s.session.queue.length>0);
+ E.validate(E.clone(s));
+});
+test('undo after a skip removes the record without requeueing skipped work',()=>{
+ const s=state();s.settings.warmups=false;
+ const entries=E.makeEntries(s,['chest']);const p=E.planEntries(s,entries);
+ s.session=E.newSession(s,{...p,entries});
+ const rec=E.completeSet(s);rec.confirmed=true;s.session.pendingLogId=null;s.session.timer=null;
+ const en=s.session.entries.find(x=>x.id===rec.entryId);
+ E.skip(s,en.id);
+ assert.equal(s.session.queue.some(t=>t.entryId===en.id),false);
+ const before=s.session.queue.length;
+ assert.equal(E.undoSet(s),true);
+ assert.equal(s.session.queue.length,before,'queue unchanged for skipped entry');
+ assert.equal(s.session.queue.some(t=>t.entryId===en.id),false);
+ E.validate(E.clone(s));
+});
+test('a warm-up-only session commits without suggestions, streak or trained-day credit',()=>{
+ const s=state();
+ const entries=E.makeEntries(s,['chest']).filter(en=>en.exerciseId==='bench-press');
+ const p=E.planEntries(s,entries);s.session=E.newSession(s,{...p,entries});
+ for(let i=0;i<3;i++){const r=E.completeSet(s);r.confirmed=true;s.session.pendingLogId=null;s.session.timer=null;assert.equal(r.warmup,true);}
+ const done=E.finishSession(s);
+ assert.equal(s.sessions.length,1);assert.equal(done.records.length,3);
+ assert.equal(Object.keys(s.suggestions).length,0);
+ assert.equal(E.streak(s),0);assert.equal(E.weeklyVolume(s).Chest,0);
+ E.validate(E.clone(s));
+});

@@ -35,3 +35,27 @@ bash scripts/build-apk.sh
 "$ANDROID_SDK_ROOT/build-tools/35.0.0/apksigner" verify --verbose release/Forge-Workout.apk
 "$ANDROID_SDK_ROOT/build-tools/35.0.0/aapt2" dump badging release/Forge-Workout.apk
 ```
+
+---
+
+# Update — 25 October 2026 (functional QA pass)
+
+An independent functional QA review exercised the full app: engine tests, static checks (syntax, bundle integrity, build-script syntax), and a 51-check end-to-end pass over the live browser preview covering planning, first-use starting loads, session logging (reps/weight/RIR/notes/failed sets), timer behaviour (transition vs rest, ±15 s, skip, expiry), reload persistence mid-session, substitutes and skips, history viewing/editing, charts and statistics, JSON export/restore/rejection, corrupt-storage recovery, discard and finish-early flows — with zero uncaught page or console errors.
+
+Three defects were found, fixed, and covered by new regression tests:
+
+| Defect | Fix | Regression coverage |
+|---|---|---|
+| Accepted "Raise? / To?" suggestions silently flipped back to un-reviewed after any history edit (also after saving equipment or progression preferences) | `recomputeSuggestions()` (www/app.js) now preserves `accepted` when the recomputed proposal is identical (same session, kind, weight, reps); a genuinely changed proposal correctly returns for review; stale suggestions for exercises without a complete session are removed | `tests/ui-smoke.js` — "History editing preserves explicitly accepted suggestions" |
+| Undo after "Unavailable today" / "Skip today" re-queued a task of the skipped entry (silently inconsistent state) | `undoSet()` (www/engine.js) no longer re-queues tasks whose entry is skipped; the record is still undone | 2 new `tests/engine.test.js` cases + end-to-end flow |
+| History editing accepted future session dates (bodyweight entry already rejected them), corrupting calendar/streak/weekly-volume semantics | `save-history` (www/app.js) rejects `startedAt > now`; the datetime input (www/modals.js) carries a `max` attribute | `tests/ui-smoke.js` — "History editing rejects future session dates without saving" |
+
+Also in this pass:
+
+- Engine suite grew 42 → **45** tests (adds undo-after-substitute, undo-after-skip, and warm-up-only session commit semantics).
+- UI smoke grew 24 → **27** checks (adds future-date rejection, accepted-suggestion preservation, and corrupt-storage recovery: warn without silent overwrite, recover on first change).
+- CI (`.github/workflows/forge-build-apk.yml`) now runs the headless browser UI smoke suite on every push and fails when the checked-in `www/forge.js` bundle drifted from the readable sources.
+- `MainActivity.WorkspaceDatabase.onUpgrade` now preserves stored data instead of throwing (future schema migrations attach there).
+- Removed the dead `ForgeStore.sync()` bridge helper; `tests/ui-results.json` is now git-ignored.
+
+Local results, 25 October 2026: **45/45 engine tests**, **51/51 end-to-end preview checks**, 0 page/console errors, checked-in bundle verified byte-identical to the readable sources. The Android runtime (SQLite bridge, screen-off alerts, alarms, reminders) remains unverifiable without a device/emulator; the phone checklist in README still applies.

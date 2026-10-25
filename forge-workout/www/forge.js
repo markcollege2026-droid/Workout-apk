@@ -392,7 +392,8 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     const session = s.session;
     if (!session || !session.records.length) return false;
     const rec = session.records.pop();
-    session.queue.unshift(clone(rec.task));
+    const en = session.entries.find((x) => x.id === rec.entryId);
+    if (en && !en.skipped) session.queue.unshift(clone(rec.task));
     session.pendingLogId = null;
     session.timer = null;
     return true;
@@ -698,12 +699,6 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       return JSON.parse(root.Native.permissions());
     } catch (e) {
       return { native: true, notifications: false, exact: false };
-    }
-  };
-  store.sync = function() {
-    if (native) {
-      root.Native.keepScreenAwake(!!store.state.session && store.state.settings.keepAwake);
-      root.Native.setReminders(JSON.stringify(store.state.settings.reminders));
     }
   };
   root.ForgeStore = store;
@@ -1023,11 +1018,12 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     const s = A.s(), sess = s.sessions.find((x) => x.id === id);
     if (!sess) return;
     const datetime = E.localDate(sess.startedAt) + "T" + String(new Date(sess.startedAt).getHours()).padStart(2, "0") + ":" + String(new Date(sess.startedAt).getMinutes()).padStart(2, "0");
+    const now = /* @__PURE__ */ new Date(), maxDatetime = E.localDate() + "T" + String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0");
     const rows = sess.records.map((r, i) => {
       const e = E.ex(s, r.exerciseId);
       return '<div class="history-set"><div class="history-set-name"><strong>'.concat(h(e.name), "</strong><small>").concat(r.warmup ? "Warm-up" : "Set", " ").concat(r.setIndex, " · ").concat(e.type === "timed" ? "seconds" : "reps").concat(r.rir !== null ? " · " + r.rir + " RIR" : "").concat(r.failed ? " · attempted / failed" : "", "</small></div>").concat(editing ? '<label><span class="soft" style="font-size:9px">kg</span><input class="history-weight" data-index="'.concat(i, '" type="number" min="0" max="1000" step=".25" value="').concat(r.weight, '" aria-label="').concat(h(e.name), ' weight"></label><label><span class="soft" style="font-size:9px">').concat(e.type === "timed" ? "sec" : "reps", '</span><input class="history-reps" data-index="').concat(i, '" type="number" min="0" max="3600" value="').concat(r.reps, '" aria-label="').concat(h(e.name), ' reps or seconds"></label><textarea class="history-note" data-index="').concat(i, '" aria-label="Set note" placeholder="Set note">').concat(h(r.note), "</textarea>").concat(!r.warmup ? '<div class="flex" style="grid-column:1/-1"><label class="check-label grow"><input class="history-failed" data-index="'.concat(i, '" type="checkbox" ').concat(r.failed ? "checked" : "", '>Attempted but failed</label><label class="flex"><span class="soft" style="font-size:9px">RIR</span><select class="history-rir" data-index="').concat(i, '" style="min-height:34px;padding:5px;font-size:10px;width:65px"><option value="">—</option>').concat([0, 1, 2, 3].map((v) => '<option value="'.concat(v, '" ').concat(r.rir === v ? "selected" : "", ">").concat(v === 3 ? "3+" : v, "</option>")).join(""), "</select></label></div>") : "") : '<div class="text-right">'.concat(A.kg(r.weight), ' kg</div><div class="text-right">').concat(r.reps).concat(e.type === "timed" ? "s" : "", "</div>").concat(r.note ? '<small style="grid-column:1/-1">'.concat(h(r.note), "</small>") : ""), "</div>");
     }).join("");
-    A.dialog("history", A.fullDate(sess.startedAt), '<div class="notice info" style="margin-bottom:18px">'.concat(sess.records.filter((r) => !r.warmup).length, " working sets · ").concat(A.actualMinutes(sess.durationSeconds), " min actual / ~").concat(A.minutes(sess.estimateSeconds), " min estimated · ~").concat(A.savedMinutes(Math.max(0, sess.straightSeconds - sess.estimateSeconds)), " min planned superset saving. Actual savings are not directly measurable.</div>").concat(editing ? '<div class="form-grid"><label><span class="field-label">Session started</span><input id="history-date-edit" type="datetime-local" value="'.concat(datetime, '"></label><label><span class="field-label">Duration · minutes</span><input id="history-duration" type="number" min="0" max="1440" step=".1" value="').concat(Math.round(sess.durationSeconds / 6) / 10, '"></label></div>') : "", '<div style="margin-top:15px">').concat(rows, '</div><div class="form-row" style="margin-top:20px"><label class="field-label">Session notes</label>').concat(editing ? '<textarea id="history-session-note">'.concat(h(sess.note), "</textarea>") : '<p class="intro">'.concat(sess.note ? h(sess.note) : "No session note.", "</p>"), "</div>"), editing ? close + '<button class="btn primary" data-action="save-history">Save changes ' + I("check", "sm") + "</button>" : '<button class="btn ghost" data-action="history-edit" data-id="'.concat(id, '">').concat(I("edit", "sm"), 'Edit this session</button><button class="btn primary" data-action="close-modal">Done</button>'), { id, editing }, true);
+    A.dialog("history", A.fullDate(sess.startedAt), '<div class="notice info" style="margin-bottom:18px">'.concat(sess.records.filter((r) => !r.warmup).length, " working sets · ").concat(A.actualMinutes(sess.durationSeconds), " min actual / ~").concat(A.minutes(sess.estimateSeconds), " min estimated · ~").concat(A.savedMinutes(Math.max(0, sess.straightSeconds - sess.estimateSeconds)), " min planned superset saving. Actual savings are not directly measurable.</div>").concat(editing ? '<div class="form-grid"><label><span class="field-label">Session started</span><input id="history-date-edit" type="datetime-local" value="'.concat(datetime, '" max="').concat(maxDatetime, '"></label><label><span class="field-label">Duration · minutes</span><input id="history-duration" type="number" min="0" max="1440" step=".1" value="').concat(Math.round(sess.durationSeconds / 6) / 10, '"></label></div>') : "", '<div style="margin-top:15px">').concat(rows, '</div><div class="form-row" style="margin-top:20px"><label class="field-label">Session notes</label>').concat(editing ? '<textarea id="history-session-note">'.concat(h(sess.note), "</textarea>") : '<p class="intro">'.concat(sess.note ? h(sess.note) : "No session note.", "</p>"), "</div>"), editing ? close + '<button class="btn primary" data-action="save-history">Save changes ' + I("check", "sm") + "</button>" : '<button class="btn ghost" data-action="history-edit" data-id="'.concat(id, '">').concat(I("edit", "sm"), 'Edit this session</button><button class="btn primary" data-action="close-modal">Done</button>'), { id, editing }, true);
   };
   A.previewInfo = () => A.dialog("info", "The same app. Native where it matters.", '<p class="intro">This is the fully interactive browser preview of Forge. Try planning, logging, editing, charts, and JSON backups. Preview data stays in this browser.</p><div class="notice info">The Android APK adds private SQLite storage, a foreground rest-timer service, screen-off alarms, sound, vibration, local reminders, and Android’s file picker.</div><p class="intro" style="margin-top:18px">Browser tabs may be suspended in the background. For the gym, install the APK; do not rely on this preview for a screen-off timer. Export a JSON backup here if you want to move your preview data to Android.</p>', '<button class="btn primary" data-action="close-modal">Got it '.concat(I("check", "sm"), "</button>"));
   A.help = () => A.dialog("help", "A clear next step.", '<div class="stack"><div><h3>Double progression</h3><p class="form-hint">Reach the range ceiling on every working set at the target load, then review a higher load and reset to the range bottom. Otherwise, keep the load and build reps.</p></div><div><h3>Safe, loadable jumps</h3><p class="form-hint">Raises fit both your increment and the default 5% cap. Beat the ceiling by 2+ on every set for a double increment. If your smallest available step is too large, the app holds and lets you override manually.</p></div><div><h3>Effort & failure</h3><p class="form-hint">0 RIR at the ceiling holds the load for one more session. Miss the minimum on at least half of your sets twice consecutively for a 10% deload suggestion. Incomplete, skipped, substituted-original, and warm-up sets never cause a penalty.</p></div><div><h3>Timed & bodyweight work</h3><p class="form-hint">Timed holds build by 5 seconds until their ceiling, then suggest load or a harder variation. Farmer Carries raise load after all 40-second sets. Bodyweight work tracks attempts and successes; added-load raises use total body load when a weigh-in exists.</p></div><div><h3>You’re in charge</h3><p class="form-hint">COMMIT saves the session and generates Raise? / To? suggestions. Accept or edit each target in Progress. Nothing silently raises your weight. Charts are training estimates, not medical advice.</p></div></div>', '<button class="btn primary" data-action="close-modal">Back to training '.concat(I("arrow", "sm"), "</button>"));
@@ -1168,10 +1164,15 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     const s = A.s();
     for (const e of s.exercises) {
       const last = E.exerciseHistory(s, e.id).pop();
-      if (last) {
-        const sug = E.suggestion(s, e, last.session);
-        if (sug) s.suggestions[e.id] = sug;
+      if (!last) {
+        delete s.suggestions[e.id];
+        continue;
       }
+      const sug = E.suggestion(s, e, last.session);
+      if (!sug) continue;
+      const prev = s.suggestions[e.id];
+      if (prev && prev.accepted && prev.sessionId === sug.sessionId && prev.kind === sug.kind && prev.weight === sug.weight && prev.reps === sug.reps) sug.accepted = true;
+      s.suggestions[e.id] = sug;
     }
   };
   A.importData = (text) => {
@@ -1454,6 +1455,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       document.querySelectorAll(".history-rir").forEach((el) => recs[Number(el.dataset.index)].rir = el.value === "" ? null : Number(el.value));
       const startedAt = new Date($("history-date-edit").value).getTime();
       if (!Number.isFinite(startedAt)) throw new Error("Invalid session date.");
+      if (startedAt > Date.now()) throw new Error("Choose a session date up to today.");
       const durationSeconds = Math.round(n("history-duration", 0, 1440) * 60);
       sess.records = recs;
       sess.startedAt = startedAt;

@@ -108,7 +108,11 @@ public class MainActivity extends Activity {
         @Override public void onCreate(SQLiteDatabase db){
             db.execSQL("CREATE TABLE workspace (id INTEGER PRIMARY KEY, state TEXT NOT NULL, modified INTEGER NOT NULL)");
         }
-        @Override public void onUpgrade(SQLiteDatabase db,int oldV,int newV){throw new IllegalStateException("Unsupported database version");}
+        @Override public void onUpgrade(SQLiteDatabase db,int oldV,int newV){
+            // Schema v1 is the only version so far. Keep the stored workspace on upgrade
+            // instead of failing; add explicit per-version migrations here when the schema changes.
+            if(oldV<1)onCreate(db);
+        }
         synchronized String load(){
             try(Cursor c=getReadableDatabase().rawQuery("SELECT state FROM workspace WHERE id=1",null)){return c.moveToFirst()?c.getString(0):"";}
         }

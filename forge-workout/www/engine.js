@@ -146,7 +146,12 @@ function completeSet(s){
 }
 function undoSet(s){
   const session=s.session;if(!session||!session.records.length)return false;
-  const rec=session.records.pop();session.queue.unshift(clone(rec.task));session.pendingLogId=null;session.timer=null;return true;
+  const rec=session.records.pop();
+  const en=session.entries.find(x=>x.id===rec.entryId);
+  // A task whose entry was skipped or substituted away after the set was logged must not
+  // re-enter the queue; the record is still undone without resurrecting skipped work.
+  if(en&&!en.skipped)session.queue.unshift(clone(rec.task));
+  session.pendingLogId=null;session.timer=null;return true;
 }
 function fullRecords(session,id){
   const en=session.entries.find(e=>e.exerciseId===id);
