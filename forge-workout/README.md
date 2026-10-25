@@ -9,7 +9,7 @@ A complete personal-use, offline Android workout app built from your workout spe
 
 ## Build on GitHub Actions
 
-The workflow is at the repository root: **`.github/workflows/forge-build-apk.yml`**. Source lives in **`forge-workout/`**. A push on any branch runs the workflow: 45 engine tests, the 27-check headless browser UI smoke suite, a guard that fails when the checked-in `www/forge.js` bundle drifted from the readable sources, then the APK build and verification. Download **Forge-Workout-APK** from a successful run and extract **Forge-Workout.apk**.
+The workflow is at the repository root: **`.github/workflows/forge-build-apk.yml`**. Source lives in **`forge-workout/`**. A push on any branch runs the workflow: 45 engine tests, the 27-check headless browser UI smoke suite, a guard that fails when the checked-in `www/forge.js` bundle drifted from the readable sources, then the APK build and verification. Download **Forge-Workout-APK** from a successful run and extract **Forge-Workout.apk**. Pushing a `v*` tag additionally publishes a **GitHub Release** with the signed APK, its SHA-256 checksum, and build details attached.
 
 The matching APK signing key is restored from the **FORGE_WORKOUT_KEYSTORE_B64** Actions secret; it is not public source. Cloud compilation processes app code only, not your phone's workout data. See **GITHUB_ACTIONS.md** for this repository's build details.
 

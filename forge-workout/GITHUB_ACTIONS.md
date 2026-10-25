@@ -1,6 +1,6 @@
 # Build Forge on GitHub Actions
 
-The repository-root workflow `.github/workflows/forge-build-apk.yml` compiles this app on pushes. It installs Java 17, Node 22, Android SDK 35/build tools 35.0.0, runs 45 engine tests and the 27-check headless browser UI smoke suite, fails when the checked-in `www/forge.js` bundle drifted from the readable sources, builds/signs a fresh APK, verifies it, and uploads the **Forge-Workout-APK** artifact.
+The repository-root workflow `.github/workflows/forge-build-apk.yml` compiles this app on pushes. It installs Java 17, Node 22, Android SDK 35/build tools 35.0.0, runs 45 engine tests and the 27-check headless browser UI smoke suite, fails when the checked-in `www/forge.js` bundle drifted from the readable sources, builds/signs a fresh APK, verifies it, and uploads the **Forge-Workout-APK** artifact. Pushing a `v*` tag runs the same pipeline and additionally publishes a GitHub Release with **Forge-Workout.apk**, **SHA256SUMS.txt**, and **build-details.txt** attached.
 
 The personal signing key is held only in the repository Actions secret **FORGE_WORKOUT_KEYSTORE_B64**. It is not committed in this public repository. The secret is the base64 encoding of the original debug keystore; it preserves update compatibility with the previously delivered APK. This is personal-use debug signing, not a production/store-release setup.
 

@@ -12,7 +12,7 @@
 
 ## Get the APK
 
-Download **Forge-Workout-APK** from the latest successful [Actions run](https://github.com/markcollege2026-droid/Workout-apk/actions) and sideload `Forge-Workout.apk` (personal-use debug-signed build), or build locally with the Android SDK:
+Download **Forge-Workout.apk** from the latest [GitHub Release](https://github.com/markcollege2026-droid/Workout-apk/releases) — pushing a `v*` tag builds, verifies, and attaches the signed APK with its SHA-256 checksum and build details. Every [Actions run](https://github.com/markcollege2026-droid/Workout-apk/actions) also uploads the same files as the **Forge-Workout-APK** artifact. Sideload on Android 8.0+ (personal-use debug-signed build), or build locally with the Android SDK:
 
 ```bash
 cd forge-workout

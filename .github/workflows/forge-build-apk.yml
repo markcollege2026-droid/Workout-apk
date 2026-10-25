@@ -18,6 +18,8 @@ jobs:
     name: Test, compile, and sign Android APK
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    permissions:
+      contents: write # needed by the tag-release step below (attach APK to GitHub Releases)
     defaults:
       run:
         shell: bash
@@ -221,6 +223,30 @@ jobs:
             ${{ steps.project.outputs.dir }}/release/apk-signature.txt
             ${{ steps.project.outputs.dir }}/release/apk-manifest.txt
             ${{ steps.project.outputs.dir }}/release/build-details.txt
+
+      - name: Publish GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: ${{ steps.project.outputs.dir }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # not an automatic env var in run: steps
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          SUMS="$(cut -d' ' -f1 release/SHA256SUMS.txt)"
+          NOTES="Offline progressive-overload workout app for Android 8.0+.
+
+          Signed APK built and verified by GitHub Actions from commit ${GITHUB_SHA:0:10}.
+          APK SHA-256: ${SUMS}
+
+          Install: enable sideloading on your device and open Forge-Workout.apk.
+          Personal-use debug signature (see signing/README.md); updates keep app data."
+          gh release create "${TAG}" \
+            release/Forge-Workout.apk release/SHA256SUMS.txt release/build-details.txt \
+            --title "Forge ${TAG}" \
+            --notes "${NOTES}" \
+            --latest \
+            || gh release upload "${TAG}" \
+              release/Forge-Workout.apk release/SHA256SUMS.txt release/build-details.txt --clobber
 
       - name: Add the download link to the run summary
         env:
