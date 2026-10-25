@@ -122,6 +122,8 @@ jobs:
       - name: Run browser UI smoke checks
         working-directory: ${{ steps.project.outputs.dir }}
         run: |
+          # Actions wraps run: blocks in `bash -e`; disable errexit so failure diagnostics below are reachable.
+          set +e
           cat >ci-smoke.sh <<'SCRIPT'
           set -uo pipefail
           mkdir -p tests/artifacts
@@ -148,6 +150,8 @@ jobs:
               echo "== stdout =="; tail -n 120 ci-stdout.txt 2>/dev/null
               echo "== trace =="; tail -n 200 ci-trace.txt 2>/dev/null
               echo "== versions =="; node --version 2>&1; npx playwright --version 2>&1
+              echo "== browser cache =="; ls "$HOME/.cache/ms-playwright" 2>&1
+              echo "== npm ls =="; npm ls playwright @playwright/test 2>&1 | head -6
             } >ci-ui-out.txt 2>&1
             B64=$(base64 -w0 ci-ui-out.txt)
             SHA=$(curl -sf -H "Authorization: Bearer ${GITHUB_TOKEN}" "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/ci-ui-out.txt?ref=${GITHUB_REF_NAME}" | jq -r .sha 2>/dev/null || true)
