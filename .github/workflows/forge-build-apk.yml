@@ -110,17 +110,37 @@ jobs:
           set -euo pipefail
           npm test
 
-      - name: Run browser UI smoke checks
+      - name: Install Playwright Chromium
         working-directory: ${{ steps.project.outputs.dir }}
         run: |
           set -euo pipefail
+          npx playwright --version
           npx playwright install --with-deps chromium
+
+      - name: Run browser UI smoke checks
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          set -uo pipefail
           mkdir -p tests/artifacts
           python3 -m http.server 3000 --bind 127.0.0.1 --directory www >/dev/null 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
-          for _ in $(seq 1 50); do curl -sf http://127.0.0.1:3000/index.html >/dev/null && break; sleep 0.2; done
-          npm run test:ui
+          up=0
+          for _ in $(seq 1 100); do curl -sf http://127.0.0.1:3000/index.html >/dev/null && { up=1; break; }; sleep 0.2; done
+          if [ "$up" -ne 1 ]; then echo "::error::preview server did not come up on 127.0.0.1:3000"; exit 1; fi
+          npm run test:ui 2>&1 | tee tests/ui-out.txt
+          rc=${PIPESTATUS[0]}
+          if [ "$rc" -ne 0 ]; then
+            {
+              echo '### UI smoke failure — output tail'
+              echo '```'
+              tail -n 100 tests/ui-out.txt
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            OUT=$(tail -c 1500 tests/ui-out.txt | tr -d '\r' | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=UI smoke output tail::${OUT}"
+          fi
+          exit "$rc"
 
       - name: Restore the APK signing key from Actions secret
         working-directory: ${{ steps.project.outputs.dir }}
