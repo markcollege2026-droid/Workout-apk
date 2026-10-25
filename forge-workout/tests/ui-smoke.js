@@ -94,7 +94,7 @@ const path=require('node:path');
   await corruptPage.goto(process.env.FORGE_URL||'http://localhost:3000');
   await expect(corruptPage.locator('#modal-title')).toContainText('needs attention');
   expect(await corruptPage.evaluate(()=>localStorage.getItem('forge.workout.v1'))).toBe('{"version":999}');
-  await corruptPage.locator('[data-action="close-modal"]').click();
+  await corruptPage.locator('[data-action="close-modal"]').first().click();
   await corruptPage.locator('[data-action="block-toggle"][data-id="legs"]').click();
   expect(await corruptPage.evaluate(()=>JSON.parse(localStorage.getItem('forge.workout.v1')).version)).toBe(1);
   await corruptPage.close();check('Corrupt saved state warns without silent overwrite and recovers on first change');
