@@ -18,6 +18,8 @@ jobs:
     name: Test, compile, and sign Android APK
     runs-on: ubuntu-24.04
     timeout-minutes: 25
+    permissions:
+      contents: write # push ci-ui-out.txt diagnostics when the UI smoke step fails
     defaults:
       run:
         shell: bash
@@ -122,23 +124,34 @@ jobs:
         run: |
           set -uo pipefail
           mkdir -p tests/artifacts
-          python3 -m http.server 3000 --bind 127.0.0.1 --directory www >/dev/null 2>&1 &
+          python3 -m http.server 3000 --bind 127.0.0.1 --directory www >server.log 2>&1 &
           SERVER_PID=$!
           trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
           up=0
           for _ in $(seq 1 100); do curl -sf http://127.0.0.1:3000/index.html >/dev/null && { up=1; break; }; sleep 0.2; done
-          if [ "$up" -ne 1 ]; then echo "::error::preview server did not come up on 127.0.0.1:3000"; exit 1; fi
-          npm run test:ui 2>&1 | tee tests/ui-out.txt
-          rc=${PIPESTATUS[0]}
+          {
+            echo "== $(date -u) server-up=$up =="
+            echo "== server.log =="; cat server.log 2>/dev/null
+            echo "== curl verbose =="; curl -sv http://127.0.0.1:3000/index.html -o /dev/null 2>&1 | head -25
+          } >ci-diagnostics.txt
+          rc=0
+          if [ "$up" -ne 1 ]; then
+            rc=1
+          else
+            # Pin IPv4 explicitly: 'localhost' may resolve to ::1 while the server binds 127.0.0.1.
+            FORGE_URL=http://127.0.0.1:3000 npm run test:ui 2>&1 | tee tests/ui-out.txt
+            rc=${PIPESTATUS[0]}
+          fi
           if [ "$rc" -ne 0 ]; then
-            {
-              echo '### UI smoke failure — output tail'
-              echo '```'
-              tail -n 100 tests/ui-out.txt
-              echo '```'
-            } >> "$GITHUB_STEP_SUMMARY"
-            OUT=$(tail -c 1500 tests/ui-out.txt | tr -d '\r' | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
-            echo "::error title=UI smoke output tail::${OUT}"
+            { cat ci-diagnostics.txt; echo "== test output =="; tail -n 250 tests/ui-out.txt 2>/dev/null; } >ci-ui-out.txt
+            git config user.name "forge-ci"
+            git config user.email "forge-ci@users.noreply.github.com"
+            git add -f ci-ui-out.txt
+            if git commit -q -m "CI debug: UI smoke failure output [skip ci]"; then
+              git push -q "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${GITHUB_REF_NAME}" \
+                || echo "::warning::could not push ci-ui-out.txt diagnostics commit"
+            fi
+            echo "::error::UI smoke checks failed (rc=$rc). See ci-ui-out.txt committed on ${GITHUB_REF_NAME}."
           fi
           exit "$rc"
 
