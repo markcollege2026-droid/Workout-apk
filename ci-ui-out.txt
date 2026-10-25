@@ -1,74 +1,107 @@
-== rc=1 ref=arena/658ffb93-workout-apk sha=local ==
+== rc=1 ref=arena/658ffb93-workout-apk sha=12d95a3c709a8157fefb06142313379536798ed3 ==
 == diagnostics ==
-== Sun Oct 25 17:43:00 UTC 2026 server-up=1 ==
+== Sun Oct 25 18:14:07 UTC 2026 server-up=1 ==
 == server.log ==
+127.0.0.1 - - [25/Oct/2026 18:14:07] "GET /index.html HTTP/1.1" 200 -
 == curl verbose ==
 *   Trying 127.0.0.1:3000...
-* Connected to 127.0.0.1 (127.0.0.1) port 3000 (#0)
+* Connected to 127.0.0.1 (127.0.0.1) port 3000
 > GET /index.html HTTP/1.1
 > Host: 127.0.0.1:3000
-> User-Agent: curl/7.88.1
+> User-Agent: curl/8.5.0
 > Accept: */*
 > 
 * HTTP 1.0, assume close after body
 < HTTP/1.0 200 OK
-< Server: SimpleHTTP/0.6 Python/3.11.2
-< Date: Sun, 25 Oct 2026 17:43:00 GMT
+< Server: SimpleHTTP/0.6 Python/3.12.3
+< Date: Sun, 25 Oct 2026 18:14:07 GMT
 < Content-type: text/html
 < Content-Length: 921
-< Last-Modified: Sun, 25 Oct 2026 17:17:08 GMT
+< Last-Modified: Sun, 25 Oct 2026 18:13:40 GMT
 < 
 { [921 bytes data]
-* Closing connection 0
+* Closing connection
 == stdout ==
 
 > forge-workout@1.0.0 test:ui
 > node tests/ui-smoke.js
 
+PASS Offline seed loads and desktop overview fits
+PASS All six navigation screens render without errors
+PASS Editable exercise definitions and machine settings memory
+PASS Add, edit and archive keep IDs and histories safe
+PASS Symmetric pairing table editing and reset
+PASS Equipment validation rejects invalid loads without a partial save
+PASS Bodyweight snapshot source is recorded locally
+PASS First-use starting-weight flow builds a complete plan
+PASS Rest starts before logging; confirmation and undo are functional
+PASS Timer expiry preserves an in-progress log
+PASS Crash/reload resumes the exact pending set and its draft
+PASS Unavailable swaps, replans and keeps independent substitute targets
+PASS Skip removes remaining work without creating a failed attempt
+PASS Full session COMMIT generates independent suggestions, real charts and records
+PASS One-tap acceptance applies the next target explicitly
+PASS History editing rejects future session dates without saving
+PASS Past-session set, note and duration editing recalculates suggestions
+PASS History editing preserves explicitly accepted suggestions
+PASS One-file JSON export includes the entire workspace
+PASS Validated JSON restore is all-or-nothing
+PASS Invalid backup leaves current data untouched
+PASS All screens remain one-handed and within a 320px viewport
+PASS Local file assets, SQLite bridge contract, timer bridge and native skip callback
+PASS Native cancellation marker prevents resurrecting a rest skipped while closed
+PASS Confirmed discard removes only the active session
 == trace ==
 + set -uo pipefail
 + mkdir -p tests/artifacts
-+ SERVER_PID=2278
++ SERVER_PID=3300
 + trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 + up=0
-++ seq 1 100
 + python3 -m http.server 3000 --bind 127.0.0.1 --directory www
+++ seq 1 100
++ for _ in $(seq 1 100)
++ curl -sf http://127.0.0.1:3000/index.html
++ sleep 0.2
 + for _ in $(seq 1 100)
 + curl -sf http://127.0.0.1:3000/index.html
 + up=1
 + break
 ++ date -u
-+ echo '== Sun Oct 25 17:43:00 UTC 2026 server-up=1 =='
++ echo '== Sun Oct 25 18:14:07 UTC 2026 server-up=1 =='
 + echo '== server.log =='
 + cat server.log
 + echo '== curl verbose =='
-+ head -25
 + curl -sv http://127.0.0.1:3000/index.html -o /dev/null
++ head -25
 + '[' 1 -ne 1 ']'
 + FORGE_URL=http://127.0.0.1:3000
 + npm run test:ui
-node:internal/process/promises:394
-    triggerUncaughtException(err, true /* fromPromise */);
-    ^
+locator.click: Error: strict mode violation: locator('[data-action="close-modal"]') resolved to 2 elements:
+    1) <button class="icon-btn" data-action="close-modal" aria-label="Close dialog">…</button> aka getByRole('button', { name: 'Close dialog' })
+    2) <button class="btn primary" data-action="close-modal">Continue with a fresh workspace</button> aka getByRole('button', { name: 'Continue with a fresh' })
 
-browserType.launch: Executable doesn't exist at /home/user/.cache/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-linux64/chrome-headless-shell
-╔════════════════════════════════════════════════════════════╗
-║ Looks like Playwright was just installed or updated.       ║
-║ Please run the following command to download new browsers: ║
-║                                                            ║
-║     npx playwright install                                 ║
-║                                                            ║
-║ <3 Playwright Team                                         ║
-╚════════════════════════════════════════════════════════════╝
-    at /home/user/Workout-apk/forge-workout/tests/ui-smoke.js:6:31
-    at Object.<anonymous> (/home/user/Workout-apk/forge-workout/tests/ui-smoke.js:105:3) {
-  log: [],
-  name: 'Error'
+Call log:
+  - waiting for locator('[data-action="close-modal"]')
+
+    at /home/runner/work/Workout-apk/Workout-apk/forge-workout/tests/ui-smoke.js:97:60 {
+  log: [ `  - waiting for locator('[data-action="close-modal"]')` ]
 }
-
-Node.js v22.22.3
-+ kill 2278
-+ true
+JS errors: []
++ kill 3300
 == versions ==
-v22.22.3
+v22.23.3
 Version 1.64.0
+== browser cache ==
+chromium-1248
+chromium_headless_shell-1248
+ffmpeg-1013
+== tools ==
+/usr/bin/jq
+/usr/bin/base64
+/usr/bin/curl
+/usr/bin/git
+== npm ls ==
+forge-workout@1.0.0 /home/runner/work/Workout-apk/Workout-apk/forge-workout
+└─┬ @playwright/test@1.64.0
+  └── playwright@1.64.0
+
