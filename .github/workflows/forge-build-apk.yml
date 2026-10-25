@@ -121,6 +121,8 @@ jobs:
 
       - name: Run browser UI smoke checks
         working-directory: ${{ steps.project.outputs.dir }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # not an automatic env var in run: steps
         run: |
           # Actions wraps run: blocks in `bash -e`; disable errexit so failure diagnostics below are reachable.
           set +e
