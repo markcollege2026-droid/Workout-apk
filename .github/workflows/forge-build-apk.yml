@@ -151,20 +151,29 @@ jobs:
               echo "== trace =="; tail -n 200 ci-trace.txt 2>/dev/null
               echo "== versions =="; node --version 2>&1; npx playwright --version 2>&1
               echo "== browser cache =="; ls "$HOME/.cache/ms-playwright" 2>&1
+              echo "== tools =="; command -v jq base64 curl git 2>&1
               echo "== npm ls =="; npm ls playwright @playwright/test 2>&1 | head -6
             } >ci-ui-out.txt 2>&1
             B64=$(base64 -w0 ci-ui-out.txt)
             SHA=$(curl -sf -H "Authorization: Bearer ${GITHUB_TOKEN}" "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/ci-ui-out.txt?ref=${GITHUB_REF_NAME}" | jq -r .sha 2>/dev/null || true)
             if [ -n "${SHA:-}" ] && [ "${SHA:-}" != "null" ]; then
-              jq -n --arg m "CI debug: UI smoke failure output [skip ci]" --arg b "$GITHUB_REF_NAME" --arg c "$B64" --arg s "$SHA" '{message:$m,branch:$b,content:$c,sha:$s}' >ci-payload.json
+              printf '{"message":"CI debug: UI smoke failure output [skip ci]","branch":"%s","content":"%s","sha":"%s"}' "$GITHUB_REF_NAME" "$B64" "$SHA" >ci-payload.json
             else
-              jq -n --arg m "CI debug: UI smoke failure output [skip ci]" --arg b "$GITHUB_REF_NAME" --arg c "$B64" '{message:$m,branch:$b,content:$c}' >ci-payload.json
+              printf '{"message":"CI debug: UI smoke failure output [skip ci]","branch":"%s","content":"%s"}' "$GITHUB_REF_NAME" "$B64" >ci-payload.json
             fi
-            curl -s -o ci-put.json -w "contents-PUT-status=%{http_code}\n" -X PUT \
+            PUTSTATUS=$(curl -s -o ci-put.json -w "%{http_code}" -X PUT \
               -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/ci-ui-out.txt" --data @ci-payload.json || true
-            head -c 300 ci-put.json 2>/dev/null; echo
-            echo "::error::UI smoke failed rc=${rc}; diagnostics PUT to ci-ui-out.txt on ${GITHUB_REF_NAME}"
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/contents/ci-ui-out.txt" --data @ci-payload.json)
+            if [ "$PUTSTATUS" != "200" ] && [ "$PUTSTATUS" != "201" ]; then
+              { echo "== contents PUT failed ($PUTSTATUS) =="; head -c 600 ci-put.json 2>/dev/null; echo; } >>ci-ui-out.txt
+              git config user.name "forge-ci"
+              git config user.email "forge-ci@users.noreply.github.com"
+              git add -f ci-ui-out.txt
+              git commit -q -m "CI debug: UI smoke failure output [skip ci]"
+              git push -q "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${GITHUB_REF_NAME}" \
+                || echo "::warning::git fallback push of diagnostics also failed"
+            fi
+            echo "::error::UI smoke failed rc=${rc}; diagnostics upload PUT=$PUTSTATUS branch=${GITHUB_REF_NAME}"
           fi
           exit "$rc"
 
