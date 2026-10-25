@@ -1,0 +1,74 @@
+== rc=1 ref=arena/658ffb93-workout-apk sha=local ==
+== diagnostics ==
+== Sun Oct 25 17:43:00 UTC 2026 server-up=1 ==
+== server.log ==
+== curl verbose ==
+*   Trying 127.0.0.1:3000...
+* Connected to 127.0.0.1 (127.0.0.1) port 3000 (#0)
+> GET /index.html HTTP/1.1
+> Host: 127.0.0.1:3000
+> User-Agent: curl/7.88.1
+> Accept: */*
+> 
+* HTTP 1.0, assume close after body
+< HTTP/1.0 200 OK
+< Server: SimpleHTTP/0.6 Python/3.11.2
+< Date: Sun, 25 Oct 2026 17:43:00 GMT
+< Content-type: text/html
+< Content-Length: 921
+< Last-Modified: Sun, 25 Oct 2026 17:17:08 GMT
+< 
+{ [921 bytes data]
+* Closing connection 0
+== stdout ==
+
+> forge-workout@1.0.0 test:ui
+> node tests/ui-smoke.js
+
+== trace ==
++ set -uo pipefail
++ mkdir -p tests/artifacts
++ SERVER_PID=2278
++ trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
++ up=0
+++ seq 1 100
++ python3 -m http.server 3000 --bind 127.0.0.1 --directory www
++ for _ in $(seq 1 100)
++ curl -sf http://127.0.0.1:3000/index.html
++ up=1
++ break
+++ date -u
++ echo '== Sun Oct 25 17:43:00 UTC 2026 server-up=1 =='
++ echo '== server.log =='
++ cat server.log
++ echo '== curl verbose =='
++ head -25
++ curl -sv http://127.0.0.1:3000/index.html -o /dev/null
++ '[' 1 -ne 1 ']'
++ FORGE_URL=http://127.0.0.1:3000
++ npm run test:ui
+node:internal/process/promises:394
+    triggerUncaughtException(err, true /* fromPromise */);
+    ^
+
+browserType.launch: Executable doesn't exist at /home/user/.cache/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-linux64/chrome-headless-shell
+╔════════════════════════════════════════════════════════════╗
+║ Looks like Playwright was just installed or updated.       ║
+║ Please run the following command to download new browsers: ║
+║                                                            ║
+║     npx playwright install                                 ║
+║                                                            ║
+║ <3 Playwright Team                                         ║
+╚════════════════════════════════════════════════════════════╝
+    at /home/user/Workout-apk/forge-workout/tests/ui-smoke.js:6:31
+    at Object.<anonymous> (/home/user/Workout-apk/forge-workout/tests/ui-smoke.js:105:3) {
+  log: [],
+  name: 'Error'
+}
+
+Node.js v22.22.3
++ kill 2278
++ true
+== versions ==
+v22.22.3
+Version 1.64.0
