@@ -1,0 +1,23 @@
+{
+  "name": "forge-workout",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "python3 -m http.server 3000 --bind 0.0.0.0 --directory www",
+    "bundle": "node scripts/bundle-web.js",
+    "test": "node --test tests/engine.test.js",
+    "test:ui": "node tests/ui-smoke.js",
+    "build:apk": "bash scripts/build-apk.sh"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "description": "Private offline progressive-overload Android workout app",
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "@playwright/test": "^1.64.0"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  }
+}
