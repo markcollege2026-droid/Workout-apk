@@ -66,8 +66,16 @@ A.chart=(points,field,color='#ff795b',bars=false)=>{
 let toastTimeout;
 A.toast=(text,ms=3500)=>{const t=document.getElementById('toast');t.textContent=text;t.classList.add('show');clearTimeout(toastTimeout);toastTimeout=setTimeout(()=>t.classList.remove('show'),ms);};
 A.save=()=>{
-  try{Store.save();if(Store.native)root.Native.keepScreenAwake(!!A.s().session&&A.s().settings.keepAwake);A.screenAwake?.();}
+  try{Store.save();A.screenAwake?.();}
   catch(e){A.toast('Could not save: '+e.message+'. Export a backup now.',9000);console.error(e);}
+};
+// A manual override must be identifiable everywhere a target is shown.
+A.targetFlags=t=>{
+  if(!t)return '';
+  const out=[];
+  if(t.manual)out.push('<span class="badge orange" title="Manual target, saved exactly as entered">MANUAL</span>');
+  if(t.configured&&t.loadable===false)out.push('<span class="badge" title="Not one of your loadable equipment weights">CUSTOM LOAD</span>');
+  return out.join(' ');
 };
 A.dialog=(type,title,body,footer='',data={},wide=false)=>{
   A.lastFocus=document.activeElement;A.ui.modal={type,data};

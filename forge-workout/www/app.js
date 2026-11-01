@@ -7,9 +7,16 @@ const n=(id,min,max,integer=false)=>{
   const value=Number(el.value);if(!Number.isFinite(value)||value<min||value>max||(integer&&!Number.isInteger(value)))throw new Error('Use '+(integer?'a whole number':'a number')+' from '+min+' to '+max+'.');return value;
 };
 let audio, wakeLock, requestingWake=false;
+const wantsScreenAwake=()=>!!(A.s().session&&A.s().settings.keepAwake);
 A.screenAwake=async()=>{
-  if(A.Store.native||!navigator.wakeLock)return;
-  if(A.s().session&&A.s().settings.keepAwake&&document.visibilityState==='visible'){
+  const keep=wantsScreenAwake();
+  if(A.Store.native){
+    // The APK owns FLAG_KEEP_SCREEN_ON; the WebView cannot set it, so ask the activity.
+    try{root.Native.keepScreenAwake(keep);}catch(e){}
+    return;
+  }
+  if(!navigator.wakeLock)return;
+  if(keep&&document.visibilityState==='visible'){
     if(wakeLock&&!wakeLock.released||requestingWake)return;requestingWake=true;
     try{wakeLock=await navigator.wakeLock.request('screen');}catch(e){}finally{requestingWake=false;}
   }else if(wakeLock){try{await wakeLock.release();}catch(e){}wakeLock=null;}
@@ -23,10 +30,28 @@ A.alert=()=>{
 A.scheduleTimer=()=>{
   const s=A.s(),timer=s.session?.timer;if(!timer)return;
   const task=s.session.queue[0];const label=task?E.ex(s,task.exerciseId).name+' · '+A.load(E.ex(s,task.exerciseId),task.weight,task.reps):'Last set complete · confirm and COMMIT';
-  if(A.Store.native)root.Native.startTimer(Math.round(timer.deadline),timer.kind,label,s.settings.sound,s.settings.vibrate);
+  if(A.Store.native)root.Native.startTimer(Math.round(timer.deadline),timer.kind,label,s.settings.sound,s.settings.vibrate,'rest');
   else enableAudio();
 };
-A.cancelTimer=()=>{if(A.Store.native)root.Native.cancelTimer();if(A.s().session)A.s().session.timer=null;};
+A.cancelTimer=()=>{if(A.Store.native)root.Native.cancelTimer('rest');if(A.s().session)A.s().session.timer=null;};
+/* Work timer = the timed exercise itself. It never shares state with the rest timer. */
+A.scheduleWorkTimer=()=>{
+  const s=A.s(),timer=s.session?.workTimer;if(!timer)return;
+  const e=E.ex(s,timer.exerciseId);
+  const label=(e?e.name+' · ':'')+'hold '+A.time(timer.total);
+  if(A.Store.native)root.Native.startTimer(Math.round(timer.deadline),'work',label,s.settings.sound,s.settings.vibrate,'work');
+  else enableAudio();
+};
+A.cancelWorkTimer=()=>{if(A.Store.native)root.Native.cancelTimer('work');if(A.s().session)A.s().session.workTimer=null;};
+const workElapsed=timer=>Math.max(0,Math.min(timer.total,Math.round((Math.min(Date.now(),timer.deadline)-(timer.deadline-timer.total*1000))/1000)));
+A.finishWorkTimer=options=>{
+  const s=A.s();if(!s.session?.workTimer)return null;
+  const result=E.finishWork(s,options||{});
+  if(!result){return null;}
+  if(A.Store.native)root.Native.cancelTimer('work');
+  A.scheduleTimer();A.save();A.render();
+  return result;
+};
 A.captureLog=(strict=false)=>{
   const sess=A.s().session,rec=sess?.records.find(r=>r.id===sess.pendingLogId);if(!rec||!$('log-reps'))return;
   if(strict){rec.reps=n('log-reps',0,3600,true);rec.weight=n('log-weight',0,1000);}
@@ -49,9 +74,9 @@ const confirmPending=()=>{
 const commitActual=()=>{
   const sess=A.s().session;if(!sess)return;
   confirmPending();if($('finish-note'))sess.note=$('finish-note').value.slice(0,5000);
-  A.cancelTimer();const done=E.finishSession(A.s());A.ui.lastCommitted=done.id;A.ui.planned=null;
+  A.cancelTimer();A.cancelWorkTimer();const done=E.finishSession(A.s());A.ui.lastCommitted=done.id;A.ui.planned=null;
   const first=done.records.find(r=>!r.warmup);if(first)A.ui.progressExercise=first.exerciseId;
-  A.save();A.navigate('progress');A.toast('COMMITTED. Every set is saved.');
+  A.save();A.screenAwake();A.navigate('progress');A.toast('COMMITTED. Every set is saved.');
 };
 const recomputeSuggestions=()=>{
   const s=A.s();for(const e of s.exercises){
@@ -65,6 +90,15 @@ const recomputeSuggestions=()=>{
     s.suggestions[e.id]=sug;
   }
 };
+// A target edited during an active workout must reach the work still ahead, not only
+// the next plan. Never rebuilds the queue while a work countdown or unconfirmed log is open.
+const applyTargetToSession=(id,weight,reps,manual)=>{
+  const s=A.s(),session=s.session;if(!session)return false;
+  let touched=false;
+  for(const en of session.entries){if(en.exerciseId!==id)continue;en.targetWeight=weight;en.targetReps=reps;en.manualTarget=manual===true;touched=true;}
+  if(touched&&!session.workTimer&&!session.pendingLogId)session.queue=E.planEntries(s,session.entries,session.records).queue;
+  return touched;
+};
 A.importData=text=>{
   try{
     if(text.length>64*1024*1024)throw new Error('Backup is larger than the 64 MB safety limit.');
@@ -72,12 +106,45 @@ A.importData=text=>{
     A.dialog('restore','Restore this workspace?',`<p class="intro">This replaces <b>all current data</b>. Export a backup first if you want to keep it.</p><div class="summary-values"><div class="summary-line"><span>Exercises</span><strong>${imported.exercises.length}</strong></div><div class="summary-line"><span>Saved sessions</span><strong>${imported.sessions.length}</strong></div><div class="summary-line"><span>Body weight entries</span><strong>${imported.bodyweights.length}</strong></div><div class="summary-line"><span>Active workout</span><strong>${imported.session?'Yes · will resume':'No'}</strong></div></div><div class="notice">Restoring is all-or-nothing. Invalid or unsupported files are rejected without changing your data.</div>`,`<button class="btn ghost" data-action="close-modal">Cancel</button><button class="btn primary" data-action="restore-confirm">Restore all data ${I('upload','sm')}</button>`,{imported});
   }catch(e){A.toast('Restore rejected: '+e.message,7000);}
 };
+// Restoring the previous workspace is validated before anything is written, and the
+// current workspace is preserved as the new recovery copy first.
+A.restorePreviousWorkspace=text=>{
+  const parsed=JSON.parse(text);
+  E.validate(parsed);
+  A.captureLog();
+  // Storage is swapped first: if it fails, nothing local has changed yet and the
+  // running timers are left alone.
+  A.Store.restorePrevious(text);
+  A.cancelTimer();A.cancelWorkTimer();
+  A.Store.state=E.clone(parsed);
+  if(!A.Store.state.session)A.Store.state.session=null;
+  A.ui.planned=null;A.ui.lastCommitted=null;A.ui.progressExercise=A.Store.state.exercises[0]?.id||'bench-press';
+  const session=A.Store.state.session;
+  if(session){
+    if(session.timer&&session.timer.deadline<=Date.now())session.timer=null;
+    if(session.workTimer&&session.workTimer.deadline<=Date.now())session.workTimer=null;
+  }
+  // The restored JSON is already stored by restorePrevious(); saving here would overwrite
+  // the copy of the workspace we just preserved, so only the timers are re-armed.
+  syncReminders();if(session?.timer)A.scheduleTimer();if(session?.workTimer)A.scheduleWorkTimer();
+  A.screenAwake();A.render();
+  return A.Store.state;
+};
 const actions={
   'nav':d=>{A.captureLog();A.save();A.navigate(d.route);},
+  'recover-previous':()=>A.openRecovery(),
+  'recover-confirm':()=>{
+    const data=A.ui.modal.data;
+    try{
+      const restored=A.restorePreviousWorkspace(data.text);
+      A.close();A.navigate(restored.session?'session':'today');
+      A.toast('Previous workspace restored. The workspace you were using is kept as the new recovery copy.',7000);
+    }catch(e){A.toast('Recovery failed: '+e.message+' Your current workspace is unchanged.',9000);}
+  },
   'close-modal':()=>A.close(),
   'preview-info':()=>A.previewInfo(),
   'help':()=>A.help(),
-  'confirm-dialog':()=>{const data=A.ui.modal.data;A.close();if(data.action==='commit-actual')commitActual();else if(data.action==='discard-session-actual'){A.cancelTimer();A.s().session=null;A.ui.planned=null;A.save();A.navigate('today');A.toast('Session discarded. Saved history is unchanged.');}else if(data.action==='reset-pairs-actual'){A.s().pairOverrides={};A.save();A.openPairing(data.id);}else if(data.action==='archive-actual'){const e=E.ex(A.s(),data.id);e.active=false;A.save();A.refreshPlanned();A.render();A.toast('Archived. History and targets are preserved.');}},
+  'confirm-dialog':()=>{const data=A.ui.modal.data;A.close();if(data.action==='commit-actual')commitActual();else if(data.action==='discard-session-actual'){A.cancelTimer();A.cancelWorkTimer();A.s().session=null;A.ui.planned=null;A.save();A.screenAwake();A.navigate('today');A.toast('Session discarded. Saved history is unchanged.');}else if(data.action==='reset-pairs-actual'){A.s().pairOverrides={};A.save();A.openPairing(data.id);}else if(data.action==='archive-actual'){const e=E.ex(A.s(),data.id);e.active=false;A.save();A.refreshPlanned();A.render();A.toast('Archived. History and targets are preserved.');}},
   'block-toggle':d=>{const s=A.s(),sel=s.settings.selectedBlocks;s.settings.selectedBlocks=sel.includes(d.id)?sel.filter(id=>id!==d.id):[...sel,d.id];A.ui.planned=null;A.save();A.render();},
   'plan-workout':()=>{
     if(A.s().session){A.navigate('session');return;}
@@ -88,11 +155,18 @@ const actions={
   },
   'conservative-starts':()=>{document.querySelectorAll('.start-weight').forEach(input=>{const e=E.ex(A.s(),input.dataset.id);input.value=E.roundWeight(A.s(),e,e.suggested);});A.toast('Conservative suggestions filled. Review them before continuing.',5000);},
   'save-starts':()=>{
-    const data=A.ui.modal.data;const values=[];
+    const data=A.ui.modal.data,s=A.s();const values=[];
     document.querySelectorAll('.start-weight').forEach(input=>{if(input.value.trim()==='')throw new Error('Enter every weight, or use conservative starts.');const w=Number(input.value);if(!Number.isFinite(w)||w<0||w>1000)throw new Error('Weights must be between 0 and 1,000 kg.');values.push([input.dataset.id,w]);});
-    values.forEach(([id,w])=>{const e=E.ex(A.s(),id);A.s().targets[id]={weight:E.roundWeight(A.s(),e,w),reps:A.s().targets[id].reps};});
+    // Starting loads typed here are explicit: they are stored exactly as entered.
+    for(const [id,w] of values){
+      const e=E.ex(s,id),current=s.targets[id]||{reps:e.min};
+      const reps=Number.isInteger(Number(current.reps))?Math.min(3600,Math.max(1,Number(current.reps))):e.min;
+      const result=E.setTarget(s,e,w,reps);
+      if(result.error)throw new Error(e.name+': '+result.error);
+      applyTargetToSession(id,result.target.weight,result.target.reps,true);
+    }
     if(data.purpose==='substitute'){
-      const en=A.s().session.entries.find(x=>x.id===data.entryId);const t=E.target(A.s(),E.ex(A.s(),en.exerciseId));en.targetWeight=t.weight;en.targetReps=t.reps;A.s().session.queue=E.planEntries(A.s(),A.s().session.entries,A.s().session.records).queue;
+      const en=s.session.entries.find(x=>x.id===data.entryId);const t=E.target(s,E.ex(s,en.exerciseId));en.targetWeight=t.weight;en.targetReps=t.reps;en.manualTarget=t.manual===true;s.session.queue=E.planEntries(s,s.session.entries,s.session.records).queue;
     }
     A.save();A.close();if(data.purpose==='plan')A.buildPlan();else{refreshActiveTimer();A.render();}
   },
@@ -102,8 +176,30 @@ const actions={
     if(A.Store.native&&!A.Store.permissions().notifications)root.Native.requestNotifications();
   },
   'set-done':()=>{
-    if(!A.s().session||A.s().session.pendingLogId||A.s().session.timer)return;
-    enableAudio();const rec=E.completeSet(A.s());if(!rec)return;A.scheduleTimer();A.save();A.render();window.scrollTo({top:0,behavior:'smooth'});
+    const s=A.s(),sess=s.session;
+    if(!sess||sess.pendingLogId||sess.timer||sess.workTimer)return;
+    const task=sess.queue[0],exercise=task&&E.ex(s,task.exerciseId);
+    // A timed exercise is started with its own work countdown, never logged by a tap.
+    if(exercise&&exercise.type==='timed'&&!task.warmup){actions['work-start']();return;}
+    enableAudio();const rec=E.completeSet(s);if(!rec)return;A.scheduleTimer();A.save();A.render();window.scrollTo({top:0,behavior:'smooth'});
+  },
+  'work-start':()=>{
+    const s=A.s();if(!s.session)return;
+    const result=E.startWork(s);
+    if(result.error){A.toast(result.error,5000);return;}
+    enableAudio();A.scheduleWorkTimer();A.save();A.render();
+    A.toast(result.exercise.name+' · hold timer started for '+result.total+' seconds.',2600);
+  },
+  'work-finish':()=>{
+    const s=A.s(),timer=s.session?.workTimer;if(!timer)return;
+    const result=A.finishWorkTimer({elapsed:workElapsed(timer)});
+    if(!result){A.toast('That hold was already saved. Nothing was recorded twice.',4000);return;}
+    A.toast('Hold ended after '+result.seconds+' seconds'+(result.early?' (early)':'')+'. Edit the seconds if needed, then confirm.',5000);
+  },
+  'work-cancel':()=>{
+    const s=A.s();if(!s.session?.workTimer)return;
+    A.cancelWorkTimer();A.save();A.render();
+    A.toast('Hold timer cancelled. No set was recorded.',4000);
   },
   'confirm-set':()=>{confirmPending();A.save();A.render();A.toast('Set saved.',1400);},
   'set-rir':d=>{A.captureLog();const sess=A.s().session,rec=sess?.records.find(r=>r.id===sess.pendingLogId);if(!rec)return;const v=Number(d.value);rec.rir=rec.rir===v?null:v;A.save();A.render();},
@@ -128,11 +224,26 @@ const actions={
   'target-edit':d=>A.openTarget(d.id),
   'suggestion-edit':d=>A.openTarget(d.id,true),
   'save-target':()=>{
-    const data=A.ui.modal.data,e=E.ex(A.s(),data.id),weight=E.roundWeight(A.s(),e,n('target-weight',0,1000)),reps=n('target-reps',e.min,e.max,true);
-    A.s().targets[e.id]={weight,reps};if(A.s().suggestions[e.id])A.s().suggestions[e.id].accepted=true;
-    A.save();A.refreshPlanned();A.close();A.render();A.toast('Next target saved: '+A.load(e,weight,reps));
+    const s=A.s(),e=E.ex(s,A.ui.modal.data.id);
+    const weight=$('target-weight')?.value.trim()??'',reps=$('target-reps')?.value.trim()??'';
+    if(weight===''||reps==='')throw new Error('Enter both a weight and a '+(e.type==='timed'?'duration in seconds':'rep target')+'.');
+    // Saved exactly as entered: no equipment rounding, no range clamping. The engine
+    // applies absolute safety limits only and reports what was actually stored.
+    const result=E.setTarget(s,e,Number(weight),Number(reps));
+    if(result.error)throw new Error(result.error);
+    applyTargetToSession(e.id,result.target.weight,result.target.reps,true);
+    A.save();A.refreshPlanned();refreshActiveTimer();A.close();A.render();A.screenAwake();
+    let message='Manual target saved: '+A.load(e,result.target.weight,result.target.reps);
+    if(result.outsideRange)message+=' · outside the normal '+e.min+'–'+e.max+' range, kept as entered.';
+    else if(!result.loadable)message+=' · kept as entered; it is not one of your loadable weights.';
+    A.toast(message,6500);
   },
-  'accept-suggestion':d=>{E.accept(A.s(),d.id);A.save();A.refreshPlanned();A.render();A.toast('Next target accepted.');},
+  'accept-suggestion':d=>{
+    const s=A.s();if(!E.accept(s,d.id)){A.toast('That suggestion is no longer available.',4000);return;}
+    const e=E.ex(s,d.id),t=E.target(s,e);
+    applyTargetToSession(d.id,t.weight,t.reps,t.manual===true);
+    A.save();A.refreshPlanned();refreshActiveTimer();A.render();A.toast('Next target accepted: '+A.load(e,t.weight,t.reps),5000);
+  },
   'chart-mode':d=>{A.ui.chartMode=d.value;A.render();},
   'analyze':d=>{A.ui.progressExercise=d.id;A.navigate('progress');},
   'history-day':d=>{A.ui.historyDate=A.ui.historyDate===d.date?null:d.date;A.render();},
@@ -175,7 +286,12 @@ const actions={
     e.equipment=$('edit-equipment').value;e.equipmentTag=$('edit-equipment-tag').value.trim().slice(0,120);e.increment=n('edit-increment',.01,100);e.priority=Number($('edit-priority').value);e.group=$('edit-group').value;
     if(['deadlift','squats','farmer-carries'].includes(e.id))e.group='SOLO';
     e.primary=$('edit-primary').checked;e.compound=$('edit-compound').checked;e.warmup=$('edit-warmup').checked;e.active=$('edit-active').checked;e.note=$('edit-note').value.slice(0,2000);e.substitutes=[...data.substitutes];
-    if(data.id){A.s().exercises=A.s().exercises.map(x=>x.id===e.id?e:x);A.s().targets[e.id].reps=Math.min(e.max,Math.max(e.min,A.s().targets[e.id].reps));if(A.s().targets[e.id].weight!==null)A.s().targets[e.id].weight=E.roundWeight(A.s(),e,A.s().targets[e.id].weight);}
+    if(data.id){
+      A.s().exercises=A.s().exercises.map(x=>x.id===e.id?e:x);
+      const t=A.s().targets[e.id];
+      // Only automatic targets follow a changed range or equipment list.
+      if(t.manual!==true){t.reps=Math.min(e.max,Math.max(e.min,t.reps));if(t.weight!==null)t.weight=E.roundWeight(A.s(),e,t.weight);}
+    }
     else{A.s().exercises.push(e);A.s().targets[e.id]={weight:e.type==='bodyweight'||e.equipment==='bodyweight'?0:null,reps:e.min};}
     A.save();A.refreshPlanned();A.close();A.render();A.toast('Exercise saved.');
   },
@@ -195,8 +311,16 @@ const actions={
       if(!values.length||values.length>1000||values.some(v=>!Number.isFinite(v)||v<0||v>1000))throw new Error('Enter a nonempty comma-separated load list from 0 to 1,000 kg.');cfg[key]=[...new Set(values)].sort((a,b)=>a-b);
     }
     if(!cfg.addedLoads.includes(0))cfg.addedLoads.unshift(0);
-    A.s().settings=cfg;for(const e of A.s().exercises){const t=A.s().targets[e.id];if(t.weight!==null)t.weight=E.roundWeight(A.s(),e,t.weight);}
-    recomputeSuggestions();A.save();A.refreshPlanned();A.close();A.render();A.toast('Loadable weights updated.');
+    A.s().settings=cfg;
+    let kept=0;
+    for(const e of A.s().exercises){
+      const t=A.s().targets[e.id];
+      // Automatic targets follow the equipment list. A manual override is preserved.
+      if(t.manual===true){kept++;continue;}
+      if(t.weight!==null)t.weight=E.roundWeight(A.s(),e,t.weight);
+    }
+    recomputeSuggestions();A.save();A.refreshPlanned();A.close();A.render();
+    A.toast('Loadable weights updated.'+(kept?' '+kept+' manual target'+(kept===1?'':'s')+' kept exactly as saved.':''),5500);
   },
   'pairing':()=>A.openPairing(),
   'reset-pairs':()=>A.confirm('Reset pairing overrides?','This clears your per-exercise overrides and restores the default symmetric group rules. Exercise group assignments stay as you edited them.','reset-pairs-actual','Reset',{id:A.ui.modal.data.id}),
@@ -213,7 +337,8 @@ const actions={
   'restore-confirm':()=>{
     const imported=E.clone(A.ui.modal.data.imported);A.cancelTimer();A.Store.state=imported;A.ui.planned=null;A.ui.lastCommitted=null;A.ui.progressExercise=imported.exercises[0].id;
     if(imported.session?.timer&&imported.session.timer.deadline<=Date.now())imported.session.timer=null;
-    A.save();syncReminders();if(imported.session?.timer)A.scheduleTimer();A.close();A.navigate(imported.session?'session':'today');A.toast('Workspace restored. All data stays on this device.');
+    if(imported.session){if(!imported.session.workTimer||imported.session.workTimer.deadline<=Date.now())imported.session.workTimer=null;}
+    A.save();syncReminders();if(imported.session?.timer)A.scheduleTimer();if(imported.session?.workTimer)A.scheduleWorkTimer();A.close();A.navigate(imported.session?'session':'today');A.toast('Workspace restored. All data stays on this device.');
   }
 };
 A.actions=actions;
@@ -257,28 +382,72 @@ document.addEventListener('keydown',event=>{
 const expire=()=>{
   if(!A.s().session?.timer)return;A.captureLog();A.s().session.timer=null;A.save();if(!A.Store.native)A.alert();A.render();A.toast(A.s().session.queue.length?'Rest complete. Your next set is ready.':'Final rest complete. Confirm and COMMIT.',2200);
 };
+// Work countdown reached zero: log the ACTUAL hold duration, then start the normal rest.
+const expireWork=complete=>{
+  const s=A.s(),timer=s.session?.workTimer;if(!timer)return false;
+  // A native delivery (or an expired stored deadline) means the full hold was completed.
+  const result=E.finishWork(s,complete?{elapsed:timer.total,at:Date.now()}:{at:Date.now()});
+  if(!result)return false;
+  if(A.Store.native)root.Native.cancelTimer('work');
+  if(!A.Store.native)A.alert();
+  A.scheduleTimer();A.save();A.render();
+  A.toast((result.early?'Hold ended after ':'Hold complete: ')+result.seconds+'s. Confirm the set, then rest.',3800);
+  return true;
+};
 setInterval(()=>{
-  const timer=A.s().session?.timer;if(!timer)return;
+  const session=A.s().session;if(!session)return;
+  const work=session.workTimer;
+  if(work){
+    const remaining=Math.max(0,Math.ceil((work.deadline-Date.now())/1000));
+    if($('work-timer-text'))$('work-timer-text').textContent=A.time(remaining);
+    if($('work-timer-ring'))$('work-timer-ring').setAttribute('stroke-dashoffset',String(320.44*(1-Math.min(1,remaining/Math.max(1,work.total)))));
+    if(work.deadline<=Date.now())expireWork();
+    return;
+  }
+  const timer=session.timer;if(!timer)return;
   const left=Math.max(0,Math.ceil((timer.deadline-Date.now())/1000));
   if($('timer-text'))$('timer-text').textContent=A.time(left);
   if($('floating-timer-text'))$('floating-timer-text').textContent=A.time(left);
   if($('timer-ring'))$('timer-ring').setAttribute('stroke-dashoffset',String(320.44*(1-Math.min(1,left/Math.max(1,timer.total)))));
   if(timer.deadline<=Date.now())expire();
 },250);
-A.syncNativeTimer=(text=null)=>{if(!A.Store.native||!root.Native.timerState)return;try{const status=JSON.parse(text||root.Native.timerState()),t=A.s().session?.timer;if(t&&(Number(status.cancelled)===t.deadline||Number(status.delivered)===t.deadline)){A.captureLog();A.s().session.timer=null;A.save();A.render();}}catch(e){}};
+A.syncNativeTimer=(text=null)=>{
+  if(!A.Store.native||!root.Native.timerState)return;
+  try{
+    const status=JSON.parse(text||root.Native.timerState()),s=A.s();
+    const t=s.session?.timer;
+    if(t&&(Number(status.cancelled)===t.deadline||Number(status.delivered)===t.deadline)){A.captureLog();s.session.timer=null;A.save();A.render();}
+    const w=s.session?.workTimer;
+    // A hold countdown that finished while the WebView was closed completes exactly once.
+    if(w&&Number(status.workDelivered)===w.deadline)expireWork(true);
+    else if(w&&Number(status.workCancelled)===w.deadline){s.session.workTimer=null;A.save();A.render();}
+  }catch(e){}
+};
 root.onNativeTimerState=text=>A.syncNativeTimer(text);
 root.onNativeTimerFinished=deadline=>{const t=A.s().session?.timer;if(t&&Math.abs(t.deadline-Number(deadline))<500)expire();};
 root.onNativeTimerCancelled=deadline=>{const t=A.s().session?.timer;if(t&&Math.abs(t.deadline-Number(deadline))<500){A.captureLog();A.s().session.timer=null;A.save();A.render();}};
+root.onNativeWorkFinished=deadline=>{const w=A.s().session?.workTimer;if(w&&Math.abs(w.deadline-Number(deadline))<500)expireWork(true);};
+root.onNativeWorkCancelled=deadline=>{const s=A.s(),w=s.session?.workTimer;if(w&&Math.abs(w.deadline-Number(deadline))<500){s.session.workTimer=null;A.save();A.render();}};
 root.onNativeImport=text=>A.importData(text);
 root.onNativeMessage=text=>A.toast(text,5000);
 root.onNativePermissions=()=>{if(A.ui.route==='settings'&&!A.ui.modal)A.render();};
+// The activity resumed: re-assert the wake flag and reconcile any native timer that
+// finished while the WebView was paused.
+root.onNativeResume=()=>{A.screenAwake();A.syncNativeTimer();};
 root.onNativeBack=()=>{if(A.ui.modal){A.close();return true;}if(A.ui.route!=='today'&&!A.s().session){A.navigate('today');return true;}if(A.ui.route!=='session'&&A.s().session){A.navigate('session');return true;}return false;};
 document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'){A.screenAwake();if(A.s().session?.timer&&A.s().session.timer.deadline<=Date.now())expire();}else{A.captureLog();A.save();}});
 A.render();A.screenAwake();if(A.Store.native)syncReminders();
 if(A.s().session){
   A.syncNativeTimer();
   if(A.s().session.timer){if(A.s().session.timer.deadline<=Date.now())A.s().session.timer=null;else A.scheduleTimer();}
-  A.toast('Workout resumed. Your last set is safe.',4000);A.render();
+  let workResumed=false;
+  const pendingWork=A.s().session?.workTimer;
+  if(pendingWork){
+    if(pendingWork.deadline<=Date.now())workResumed=expireWork(pendingWork.deadline<Date.now()-2000);
+    else A.scheduleWorkTimer();
+  }
+  if(!workResumed)A.toast('Workout resumed. Your last set is safe.',4000);
+  A.render();
 }
 if(!A.Store.error)A.save();
 if(A.Store.error)A.dialog('storage-error','A storage file needs attention.',`<p class="intro">Your saved state could not be read: ${h(A.Store.error)}. Restore a valid JSON backup in Settings. The app has not overwritten the unreadable state; continuing and making changes creates a new state.</p>`,`<button class="btn ghost" data-action="import">Restore a backup</button><button class="btn primary" data-action="close-modal">Continue with a fresh workspace</button>`);

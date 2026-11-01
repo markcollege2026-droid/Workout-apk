@@ -190,6 +190,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   const key = (a, b) => [a, b].sort().join("|");
   const number = (v, d = 0) => Number.isFinite(Number(v)) ? Number(v) : d;
   const rounded = (n) => Math.round(n * 100) / 100;
+  const LIMITS = { weight: { min: 0, max: 1e3 }, reps: { min: 1, max: 3600 } };
   function canPair(s, a, b) {
     if (a.id === b.id) return false;
     const ga = a.pairGroup || a.group, gb = b.pairGroup || b.group;
@@ -230,7 +231,35 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   }
   function target(s, e) {
     const t = s.targets[e.id] || { weight: null, reps: e.min };
-    return { weight: roundWeight(s, e, t.weight === null ? e.suggested : t.weight), reps: Math.max(e.min, Math.min(e.max, number(t.reps, e.min))), configured: t.weight !== null };
+    if (t.manual === true && t.weight !== null && Number.isFinite(Number(t.weight))) {
+      const weight2 = Math.max(LIMITS.weight.min, Math.min(LIMITS.weight.max, Number(t.weight)));
+      const reps = Math.max(LIMITS.reps.min, Math.min(LIMITS.reps.max, Math.round(number(t.reps, e.min))));
+      return { weight: weight2, reps, configured: true, manual: true, loadable: loadable(s, e).some((v) => Math.abs(v - weight2) < 1e-3) };
+    }
+    const weight = roundWeight(s, e, t.weight === null ? e.suggested : t.weight);
+    return {
+      weight,
+      reps: Math.max(e.min, Math.min(e.max, number(t.reps, e.min))),
+      configured: t.weight !== null,
+      manual: false,
+      loadable: loadable(s, e).some((v) => Math.abs(v - weight) < 1e-3)
+    };
+  }
+  function isManual(s, id) {
+    var _a;
+    return ((_a = s.targets[id]) == null ? void 0 : _a.manual) === true;
+  }
+  function setTarget(s, e, weight, reps) {
+    const w = Number(weight), r = Number(reps);
+    const unit = e.type === "timed" ? "seconds" : "reps";
+    if (!Number.isFinite(w) || weight === "" || weight === null) return { error: "Enter a weight between " + LIMITS.weight.min + " and " + LIMITS.weight.max + " kg." };
+    if (w < LIMITS.weight.min || w > LIMITS.weight.max) return { error: "Weights must be between " + LIMITS.weight.min + " and " + LIMITS.weight.max + " kg." };
+    if (reps === "" || reps === null || !Number.isFinite(r) || !Number.isInteger(r)) return { error: "Enter a whole number of " + unit + "." };
+    if (r < LIMITS.reps.min || r > LIMITS.reps.max) return { error: "Target " + unit + " must be between " + LIMITS.reps.min + " and " + LIMITS.reps.max + "." };
+    const stored = { weight: rounded(w), reps: r, manual: true, overriddenAt: Date.now() };
+    s.targets[e.id] = stored;
+    if (s.suggestions[e.id]) delete s.suggestions[e.id];
+    return { ok: true, target: __spreadValues({}, stored), outsideRange: r < e.min || r > e.max, loadable: loadable(s, e).some((v) => Math.abs(v - stored.weight) < 1e-3) };
   }
   function rest(s, e) {
     return e.rest === null || e.rest === void 0 ? s.settings.rest : e.rest;
@@ -238,7 +267,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   function makeEntries(s, selected) {
     return s.exercises.filter((e) => e.active && e.primary && selected.includes(e.block)).sort((a, b) => a.order - b.order).map((e) => {
       const t = target(s, e);
-      return { id: uid(), exerciseId: e.id, sourceId: e.id, pairGroup: e.group, sets: e.sets, targetWeight: t.weight, targetReps: t.reps, skipped: false };
+      return { id: uid(), exerciseId: e.id, sourceId: e.id, pairGroup: e.group, sets: e.sets, targetWeight: t.weight, targetReps: t.reps, manualTarget: t.manual === true, skipped: false };
     });
   }
   function planEntries(s, entries, records = []) {
@@ -303,6 +332,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
         for (let i = 0; i < active.length; i++) {
           const e = active[i];
           const last = i === active.length - 1;
+          const floor = e.manualTarget ? Math.min(e.min, Math.max(1, Math.round(number(e.targetReps, e.min)))) : e.min;
           queue.push({
             id: uid(),
             entryId: e.entryId,
@@ -312,8 +342,9 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
             warmup: false,
             weight: e.targetWeight,
             reps: e.targetReps,
-            min: e.min,
+            min: floor,
             max: e.max,
+            manualTarget: e.manualTarget === true,
             kind: group.length === 3 ? "triple" : group.length === 2 ? "superset" : "straight",
             transition: !last,
             group: g,
@@ -355,6 +386,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       queue: clone(planned.queue),
       records: [],
       timer: null,
+      workTimer: null,
       pendingLogId: null,
       note: "",
       estimateSeconds: planned.seconds,
@@ -367,16 +399,23 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     var _a, _b;
     return (_b = (_a = s.bodyweights.filter((b) => b.date <= localDate(at)).sort((a, b) => b.date.localeCompare(a.date))[0]) == null ? void 0 : _a.weight) != null ? _b : null;
   }
-  function completeSet(s) {
+  function completeSet(s, actual = null) {
     const session = s.session;
     if (!session || !session.queue.length) return null;
-    const task = session.queue.shift(), e = ex(s, task.exerciseId);
+    if (session.workTimer) return null;
+    const task = session.queue[0], e = ex(s, task.exerciseId);
+    if (e && e.type === "timed" && !task.warmup && !actual) return null;
+    session.queue.shift();
+    const elapsed = actual && Number.isFinite(Number(actual.reps)) ? Math.max(0, Math.min(LIMITS.reps.max, Math.round(Number(actual.reps)))) : null;
+    const reps = elapsed === null ? task.reps : elapsed;
     const rec = __spreadProps(__spreadValues({}, clone(task)), {
       id: uid(),
       task: clone(task),
       at: Date.now(),
       weight: task.weight,
-      reps: task.reps,
+      reps,
+      plannedReps: task.reps,
+      early: !!(actual && actual.early) && reps < task.reps,
       confirmed: false,
       rir: null,
       note: "",
@@ -388,6 +427,44 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     session.timer = { deadline: Date.now() + task.restAfter * 1e3, total: task.restAfter, kind: task.warmup ? "warmup" : task.transition ? "transition" : "rest" };
     return rec;
   }
+  function startWork(s, at = Date.now()) {
+    const session = s.session;
+    if (!session) return { error: "No active workout." };
+    if (session.workTimer) return { error: "A work timer is already running." };
+    if (session.pendingLogId) return { error: "Confirm the set you just finished first." };
+    if (session.timer) return { error: "Your rest timer is still running. Skip it before starting the next set." };
+    const task = session.queue[0];
+    if (!task) return { error: "No sets left in this workout." };
+    const e = ex(s, task.exerciseId);
+    if (!e) return { error: "This exercise is no longer available." };
+    if (e.type !== "timed" || task.warmup) return { error: "This set is not timed by the clock. Use Set done." };
+    const total = Math.max(1, Math.min(LIMITS.reps.max, Math.round(number(task.reps, e.min))));
+    const timer = { deadline: Math.round(at) + total * 1e3, total, startedAt: Math.round(at), taskId: task.id, entryId: task.entryId, exerciseId: e.id };
+    session.workTimer = timer;
+    return { ok: true, timer: __spreadValues({}, timer), exercise: e, total };
+  }
+  function finishWork(s, options = {}) {
+    const session = s.session, timer = session && session.workTimer;
+    if (!timer) return null;
+    const at = Number.isFinite(Number(options.at)) ? Number(options.at) : Date.now();
+    let seconds;
+    if (options.elapsed !== null && options.elapsed !== void 0 && options.elapsed !== "" && Number.isFinite(Number(options.elapsed))) {
+      seconds = Math.round(Number(options.elapsed));
+    } else {
+      const started = timer.deadline - timer.total * 1e3;
+      seconds = Math.round((Math.min(at, timer.deadline) - started) / 1e3);
+    }
+    seconds = Math.max(0, Math.min(timer.total, Math.min(LIMITS.reps.max, seconds)));
+    session.workTimer = null;
+    const rec = completeSet(s, { reps: seconds, early: seconds < timer.total });
+    return rec ? { record: rec, seconds, early: rec.early } : null;
+  }
+  function cancelWork(s) {
+    const session = s.session;
+    if (!session || !session.workTimer) return false;
+    session.workTimer = null;
+    return true;
+  }
   function undoSet(s) {
     const session = s.session;
     if (!session || !session.records.length) return false;
@@ -396,6 +473,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     if (en && !en.skipped) session.queue.unshift(clone(rec.task));
     session.pendingLogId = null;
     session.timer = null;
+    session.workTimer = null;
     return true;
   }
   function fullRecords(session, id) {
@@ -499,6 +577,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     session.endedAt = Date.now();
     session.durationSeconds = Math.max(0, Math.round((session.endedAt - session.startedAt) / 1e3));
     session.timer = null;
+    session.workTimer = null;
     session.pendingLogId = null;
     session.queue = [];
     session.records.forEach((r) => {
@@ -517,7 +596,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   function accept(s, id, weight = null, reps = null) {
     const sug = s.suggestions[id];
     if (!sug) return false;
-    s.targets[id] = { weight: weight === null ? sug.weight : weight, reps: reps === null ? sug.reps : reps };
+    s.targets[id] = { weight: weight === null ? sug.weight : weight, reps: reps === null ? sug.reps : reps, manual: false };
     sug.accepted = true;
     return true;
   }
@@ -542,6 +621,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       sets: e.sets,
       targetWeight: t.weight,
       targetReps: t.reps,
+      manualTarget: t.manual === true,
       skipped: false
     };
     sess.entries.push(replacement);
@@ -642,6 +722,8 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     for (const id of ids) {
       const t = s.targets[id];
       if (!t || t.weight !== null && !finite(t.weight, 0, 1e3) || !Number.isInteger(t.reps) || !finite(t.reps, 1, 3600)) fail("targets");
+      if (t.manual !== void 0 && typeof t.manual !== "boolean") fail("targets");
+      if (t.overriddenAt !== void 0 && !finite(t.overriddenAt, 0, 1e14)) fail("targets");
     }
     for (const [k, v] of Object.entries(s.pairOverrides)) {
       const pair = k.split("|");
@@ -657,16 +739,25 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     for (const b of s.bodyweights) if (!finite(b.weight, 1, 500) || !/^\d{4}-\d{2}-\d{2}$/.test(b.date) || !Number.isFinite((/* @__PURE__ */ new Date(b.date + "T12:00:00")).getTime())) fail("bodyweight log");
     for (const sess of [...s.sessions, ...s.session ? [s.session] : []]) {
       if (!sess || typeof sess.id !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(sess.id) || !Array.isArray(sess.blocks) || sess.blocks.some((id) => !["chest", "back", "legs", "abs", "shoulders", "forearms"].includes(id)) || !finite(sess.startedAt, 0, 1e14) || !Array.isArray(sess.entries) || !Array.isArray(sess.records) || !Array.isArray(sess.queue)) fail("session");
-      for (const en of sess.entries) if (!ids.has(en.exerciseId) || !ids.has(en.sourceId) || !Number.isInteger(en.sets) || !finite(en.sets, 1, 20) || typeof en.id !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(en.id) || typeof en.skipped !== "boolean" || !finite(en.targetWeight, 0, 1e3) || !finite(en.targetReps, 1, 3600)) fail("session exercise");
+      for (const en of sess.entries) {
+        if (!ids.has(en.exerciseId) || !ids.has(en.sourceId) || !Number.isInteger(en.sets) || !finite(en.sets, 1, 20) || typeof en.id !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(en.id) || typeof en.skipped !== "boolean" || !finite(en.targetWeight, 0, 1e3) || !finite(en.targetReps, 1, 3600)) fail("session exercise");
+        if (en.manualTarget !== void 0 && typeof en.manualTarget !== "boolean") fail("session exercise");
+      }
       for (const r of [...sess.records, ...sess.queue]) if (!ids.has(r.exerciseId) || !finite(r.weight, 0, 1e3) || !finite(r.reps, 0, 3600) || typeof r.entryId !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(r.entryId) || !sess.entries.some((en) => en.id === r.entryId)) fail("set data");
       for (const r of sess.records) if (typeof r.confirmed !== "boolean" || typeof r.warmup !== "boolean" || r.rir !== null && (!Number.isInteger(r.rir) || r.rir < 0 || r.rir > 3) || typeof r.note !== "string") fail("logged set");
       if (sess === s.session && sess.records.some((r) => !r.task || typeof r.task.exerciseId !== "string")) fail("active set undo data");
       if (sess.pendingLogId !== null && !sess.records.some((r) => r.id === sess.pendingLogId)) fail("pending log");
       if (sess.timer && (!finite(sess.timer.deadline, 0, 1e14) || !finite(sess.timer.total, 0, 86400))) fail("active timer");
+      if (sess.workTimer) {
+        const w = sess.workTimer;
+        if (typeof w.taskId !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(w.taskId) || typeof w.entryId !== "string" || !finite(w.deadline, 0, 1e14) || !finite(w.total, 1, 3600) || !finite(w.startedAt, 0, 1e14)) fail("active work timer");
+        if (sess.timer) fail("overlapping rest and work timers");
+      }
+      for (const r of sess.records) if (r.early !== void 0 && typeof r.early !== "boolean") fail("logged set");
     }
     return true;
   }
-  const api = { GROUPS, clone, uid, ex, key, canPair, loadable, roundWeight, target, rest, makeEntries, planEntries, plan, newSession, bodyweight, completeSet, undoSet, fullRecords, exerciseHistory, lastRecords, suggestion, finishSession, accept, substitute, skip, actualLoad, epley, stats, stalled, weeklyVolume, localDate, streak, validate };
+  const api = { GROUPS, LIMITS, clone, uid, ex, key, canPair, loadable, roundWeight, target, isManual, setTarget, rest, makeEntries, planEntries, plan, newSession, bodyweight, completeSet, startWork, finishWork, cancelWork, undoSet, fullRecords, exerciseHistory, lastRecords, suggestion, finishSession, accept, substitute, skip, actualLoad, epley, stats, stalled, weeklyVolume, localDate, streak, validate };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.ForgeEngine = api;
 })(typeof window !== "undefined" ? window : globalThis);
@@ -674,8 +765,9 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   "use strict";
   const native = typeof root.Native !== "undefined";
   const store = { native, error: null, state: null };
+  const CURRENT = "forge.workout.v1", PREVIOUS = "forge.workout.v1.previous";
   try {
-    const raw = native ? root.Native.loadState() : localStorage.getItem("forge.workout.v1");
+    const raw = native ? root.Native.loadState() : localStorage.getItem(CURRENT);
     if (raw) {
       const parsed = JSON.parse(raw);
       root.ForgeEngine.validate(parsed);
@@ -685,13 +777,52 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     store.error = e.message;
   }
   if (!store.state) store.state = root.ForgeSeed.createState();
+  const keepPrevious = (raw) => {
+    if (raw === null || raw === void 0 || raw === "") return;
+    try {
+      localStorage.setItem(PREVIOUS, raw);
+      localStorage.setItem(PREVIOUS + ".modified", String(Date.now()));
+    } catch (e) {
+    }
+  };
   store.save = function() {
     store.state.updatedAt = Date.now();
     const raw = JSON.stringify(store.state);
     if (native) {
       const result = root.Native.saveState(raw);
       if (result !== "ok") throw new Error(result || "SQLite save failed");
-    } else localStorage.setItem("forge.workout.v1", raw);
+    } else {
+      keepPrevious(localStorage.getItem(CURRENT));
+      localStorage.setItem(CURRENT, raw);
+    }
+  };
+  store.previous = function() {
+    if (native) {
+      try {
+        const info = JSON.parse(root.Native.previousState() || "{}");
+        return { available: !!info.available, modified: Number(info.modified) || null, text: typeof info.state === "string" ? info.state : "", error: info.error || null };
+      } catch (e) {
+        return { available: false, modified: null, text: "", error: e.message };
+      }
+    }
+    try {
+      const raw = localStorage.getItem(PREVIOUS);
+      const modified = Number(localStorage.getItem(PREVIOUS + ".modified")) || null;
+      return raw ? { available: true, modified, text: raw, error: null } : { available: false, modified: null, text: "", error: null };
+    } catch (e) {
+      return { available: false, modified: null, text: "", error: e.message };
+    }
+  };
+  store.restorePrevious = function(text) {
+    if (native) {
+      const result = root.Native.restorePrevious(text);
+      if (result !== "ok") throw new Error(result || "The recovery copy could not be restored.");
+      return true;
+    }
+    const current = localStorage.getItem(CURRENT);
+    keepPrevious(current);
+    localStorage.setItem(CURRENT, text);
+    return true;
   };
   store.permissions = function() {
     if (!native) return { notifications: false, exact: false, native: false };
@@ -802,12 +933,18 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     var _a;
     try {
       Store.save();
-      if (Store.native) root.Native.keepScreenAwake(!!A.s().session && A.s().settings.keepAwake);
       (_a = A.screenAwake) == null ? void 0 : _a.call(A);
     } catch (e) {
       A.toast("Could not save: " + e.message + ". Export a backup now.", 9e3);
       console.error(e);
     }
+  };
+  A.targetFlags = (t) => {
+    if (!t) return "";
+    const out = [];
+    if (t.manual) out.push('<span class="badge orange" title="Manual target, saved exactly as entered">MANUAL</span>');
+    if (t.configured && t.loadable === false) out.push('<span class="badge" title="Not one of your loadable equipment weights">CUSTOM LOAD</span>');
+    return out.join(" ");
   };
   A.dialog = (type, title, body, footer = "", data = {}, wide = false) => {
     var _a;
@@ -879,14 +1016,20 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       const e = t ? E.ex(s, t.exerciseId) : null;
       main += '<section class="card timer-card"><div class="between"><span class="badge orange">'.concat(I("timer", "sm"), " ").concat(timer.kind === "transition" ? "TRANSITION" : timer.kind === "warmup" ? "WARM-UP REST" : "REST IS RUNNING", '</span><span class="soft" style="font-size:9px">Starts at the tap. Always.</span></div><div class="timer-main"><div class="timer-dial"><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="51" fill="none" stroke="#ff795b12" stroke-width="4"/><circle id="timer-ring" cx="60" cy="60" r="51" fill="none" stroke="#ff795b" stroke-width="4" stroke-linecap="round" stroke-dasharray="320.44" stroke-dashoffset="').concat(320.44 * (1 - Math.min(1, seconds / Math.max(timer.total, 1))), '"/></svg><div class="timer-readout"><strong id="timer-text">').concat(A.time(seconds), "</strong><small>").concat(timer.kind === "transition" ? "switch stations" : "breathe. reset.", '</small></div></div><div class="timer-next"><div class="eyebrow">').concat(e ? "UP NEXT" : "LAST SET COMPLETE", "</div><h3>").concat(e ? h(e.name) : "Finish strong.", "</h3><p>").concat(e ? h(A.load(e, t.weight, t.reps)) : "Confirm your log, then COMMIT.", '</p><small class="soft">').concat(t ? "Set " + t.setIndex + " of " + t.sets : "", '</small></div></div><div class="timer-controls"><button class="btn ghost" data-action="timer-adjust" data-delta="-15">−15 sec</button><button class="btn ghost" data-action="timer-adjust" data-delta="15">+15 sec</button><button class="btn secondary" data-action="timer-skip">Skip rest ').concat(I("skip", "sm"), "</button></div></section>");
     }
+    const work = session.workTimer;
+    if (work) {
+      const we = E.ex(s, work.exerciseId), wt = session.queue[0];
+      const left = Math.max(0, Math.ceil((work.deadline - Date.now()) / 1e3));
+      main += '<section class="card timer-card work-timer"><div class="between"><span class="badge green">'.concat(I("timer", "sm"), " TIMED WORK · ").concat(work.total, ' SEC TARGET</span><span class="soft" style="font-size:9px">Keep holding</span></div><div class="timer-main"><div class="timer-dial"><svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="51" fill="none" stroke="#b8d98b1a" stroke-width="4"/><circle id="work-timer-ring" cx="60" cy="60" r="51" fill="none" stroke="#b8d98b" stroke-width="4" stroke-linecap="round" stroke-dasharray="320.44" stroke-dashoffset="').concat(320.44 * (1 - Math.min(1, left / Math.max(work.total, 1))), '"/></svg><div class="timer-readout"><strong id="work-timer-text">').concat(A.time(left), "</strong><small>of ").concat(work.total, ' sec</small></div></div><div class="timer-next"><div class="eyebrow">TIMED EXERCISE</div><h3>').concat(we ? h(we.name) : "Hold", "</h3><p>").concat(wt && we ? h(A.load(we, wt.weight, work.total)) : "Hold the target position", '</p><small class="soft">Rest starts when this hold ends.</small></div></div><div class="timer-controls"><button class="btn secondary" data-action="work-finish">Finish early ').concat(I("check", "sm"), '</button><button class="btn ghost" data-action="work-cancel">Cancel timer ').concat(I("close", "sm"), '</button></div><p class="form-hint text-center">Finish early logs the seconds you actually held. Cancelling records no set.</p></section>');
+    }
     if (pending) {
       const e = E.ex(s, pending.exerciseId);
-      main += '<section class="card log-panel" id="log-panel"><div class="between"><div><span class="eyebrow purple">'.concat(pending.warmup ? "WARM-UP LOG" : "LOG THIS SET", '</span><h3 style="margin-top:6px">').concat(h(e.name), ' <span class="soft">· ').concat(pending.setIndex, '</span></h3></div><span class="badge purple">').concat(timer ? "DURING YOUR REST" : "ONE TAP TO CONFIRM", '</span></div><div class="log-grid"><label><span class="field-label">').concat(e.type === "timed" && !pending.warmup ? "Seconds completed" : "Reps done", '</span><input id="log-reps" type="number" min="0" max="3600" step="1" inputmode="numeric" value="').concat(pending.reps, '"></label><label><span class="field-label">').concat(e.equipment === "bodyweight" ? "Added weight" : "Weight used", " · kg").concat(e.equipment === "dumbbell" ? " / hand" : "", '</span><input id="log-weight" type="number" min="0" max="1000" step=".25" inputmode="decimal" value="').concat(pending.weight, '"></label></div>').concat(s.settings.effort && !pending.warmup ? '<div class="effort-row"><small>Reps left in the tank <span class="soft">(optional)</span></small><div class="rir-buttons">'.concat([0, 1, 2, 3].map((v) => '<button class="rir '.concat(pending.rir === v ? "active" : "", '" data-action="set-rir" data-value="').concat(v, '">').concat(v === 3 ? "3+" : v, "</button>")).join(""), "</div></div>") : "").concat(!pending.warmup && e.type === "bodyweight" ? '<label class="check-label"><input id="log-failed" type="checkbox" '.concat(pending.failed ? "checked" : "", '>Attempted but failed <span class="soft">(auto if below ').concat(e.min, ")</span></label>") : "", '<textarea id="log-note" placeholder="Set note · pain, form, energy…" aria-label="Set note">').concat(h(pending.note), '</textarea><button class="btn secondary full" data-action="confirm-set">').concat(I("check"), 'Confirm set</button><p class="form-hint text-center">').concat(timer ? "Your timer is already running. Logging never delays it." : "Prefilled with your target. Edit only what changed.", "</p></section>");
+      main += '<section class="card log-panel" id="log-panel"><div class="between"><div><span class="eyebrow purple">'.concat(pending.warmup ? "WARM-UP LOG" : "LOG THIS SET", '</span><h3 style="margin-top:6px">').concat(h(e.name), ' <span class="soft">· ').concat(pending.setIndex, '</span></h3></div><span class="badge purple">').concat(timer ? "DURING YOUR REST" : "ONE TAP TO CONFIRM", "</span></div>").concat(pending.early ? '<div class="notice">'.concat(I("info", "sm"), " Ended early: held <b>").concat(pending.reps, "</b> of ").concat(pending.plannedReps, " seconds. Edit the seconds below if needed.</div>") : "", '<div class="log-grid"><label><span class="field-label">').concat(e.type === "timed" && !pending.warmup ? "Seconds completed" : "Reps done", '</span><input id="log-reps" type="number" min="0" max="3600" step="1" inputmode="numeric" value="').concat(pending.reps, '"></label><label><span class="field-label">').concat(e.equipment === "bodyweight" ? "Added weight" : "Weight used", " · kg").concat(e.equipment === "dumbbell" ? " / hand" : "", '</span><input id="log-weight" type="number" min="0" max="1000" step=".25" inputmode="decimal" value="').concat(pending.weight, '"></label></div>').concat(s.settings.effort && !pending.warmup ? '<div class="effort-row"><small>Reps left in the tank <span class="soft">(optional)</span></small><div class="rir-buttons">'.concat([0, 1, 2, 3].map((v) => '<button class="rir '.concat(pending.rir === v ? "active" : "", '" data-action="set-rir" data-value="').concat(v, '">').concat(v === 3 ? "3+" : v, "</button>")).join(""), "</div></div>") : "").concat(!pending.warmup && e.type === "bodyweight" ? '<label class="check-label"><input id="log-failed" type="checkbox" '.concat(pending.failed ? "checked" : "", '>Attempted but failed <span class="soft">(auto if below ').concat(e.min, ")</span></label>") : "", '<textarea id="log-note" placeholder="Set note · pain, form, energy…" aria-label="Set note">').concat(h(pending.note), '</textarea><button class="btn secondary full" data-action="confirm-set">').concat(I("check"), 'Confirm set</button><p class="form-hint text-center">').concat(timer ? "Your timer is already running. Logging never delays it." : "Prefilled with your target. Edit only what changed.", "</p></section>");
     }
     if (t) {
       const e = E.ex(s, t.exerciseId), last = E.lastRecords(s, e.id).find((r) => r.setIndex === t.setIndex);
       const note = e.note;
-      main += '<section class="card active-exercise"><div class="between"><span class="badge '.concat(t.warmup ? "yellow" : t.kind === "straight" ? "" : "purple", '">').concat(t.warmup ? "WARM-UP RAMP" : t.kind === "superset" ? "SUPERSET" : t.kind === "triple" ? "TRIPLE SET" : "STRAIGHT SET", '</span><span class="muted" style="font-size:11px">Set <b>').concat(t.setIndex, "</b> / ").concat(t.sets, "</span></div><h2>").concat(h(e.name), '</h2><div class="exercise-meta">').concat(h(e.equipmentTag || (e.equipment === "bodyweight" ? "Bodyweight" : e.equipment.charAt(0).toUpperCase() + e.equipment.slice(1))), " · ").concat(t.warmup ? "Warm-ups never affect progression" : e.min + "–" + e.max + (e.type === "timed" ? " seconds" : " reps") + " · " + E.rest(s, e) + " sec rest").concat(e.equipment === "dumbbell" ? " · kg per hand" : "", "</div>").concat(note ? '<div class="notice info">'.concat(I("note", "sm"), " ").concat(h(note), "</div>") : "", '<div class="target-display">').concat(e.equipment === "bodyweight" && t.weight === 0 ? '<span class="value" style="font-size:30px">Bodyweight</span>' : '<span class="value">'.concat(e.equipment === "bodyweight" ? "+" : "").concat(A.kg(t.weight), '<span class="unit">kg').concat(e.equipment === "dumbbell" ? " / hand" : "", "</span></span>"), '<span class="times">×</span><span class="value">').concat(t.reps, '<span class="unit">').concat(e.type === "timed" && !t.warmup ? "sec" : "reps", "</span></span></div>").concat(e.type === "bodyweight" && ["pull-ups", "dips"].includes(e.id) ? '<p class="form-hint">Total load: '.concat(E.bodyweight(s) ? A.kg(E.bodyweight(s) + t.weight) + " kg (body weight + added load)" : "log your body weight to see total load", ".</p>") : "", '<div class="last-set"><span class="eyebrow" style="font-size:8px;display:block;margin-bottom:5px">LAST SESSION · SET ').concat(t.setIndex, "</span>").concat(last && !t.warmup ? "<strong>".concat(h(A.load(e, last.weight, last.reps)), "</strong>").concat(last.rir !== null ? " · " + last.rir + " RIR" : "") : "No previous working set. Start conservatively.", '</div><button class="btn primary full jumbo" data-action="set-done" ').concat(timer || pending ? "disabled" : "", ">").concat(I("check"), ' Set done <span style="font-size:11px;font-weight:500;margin-left:auto">').concat(timer ? "Rest is running" : pending ? "Confirm your last set" : t.transition ? "Next exercise · " + t.restAfter + "s" : "Start " + A.time(t.restAfter) + " rest", '</span></button><div class="set-actions"><button class="link-btn" data-action="unavailable" data-entry="').concat(t.entryId, '">').concat(I("swap", "sm"), 'Unavailable today</button><button class="link-btn" data-action="skip-exercise" data-entry="').concat(t.entryId, '">').concat(I("skip", "sm"), "Skip today</button></div></section>");
+      main += '<section class="card active-exercise"><div class="between"><span class="badge '.concat(t.warmup ? "yellow" : t.kind === "straight" ? "" : "purple", '">').concat(t.warmup ? "WARM-UP RAMP" : t.kind === "superset" ? "SUPERSET" : t.kind === "triple" ? "TRIPLE SET" : "STRAIGHT SET", '</span><span class="muted" style="font-size:11px">Set <b>').concat(t.setIndex, "</b> / ").concat(t.sets, "</span></div><h2>").concat(h(e.name), '</h2><div class="exercise-meta">').concat(h(e.equipmentTag || (e.equipment === "bodyweight" ? "Bodyweight" : e.equipment.charAt(0).toUpperCase() + e.equipment.slice(1))), " · ").concat(t.warmup ? "Warm-ups never affect progression" : e.min + "–" + e.max + (e.type === "timed" ? " seconds" : " reps") + " · " + E.rest(s, e) + " sec rest").concat(e.equipment === "dumbbell" ? " · kg per hand" : "", "</div>").concat(note ? '<div class="notice info">'.concat(I("note", "sm"), " ").concat(h(note), "</div>") : "", '<div class="target-display">').concat(e.equipment === "bodyweight" && t.weight === 0 ? '<span class="value" style="font-size:30px">Bodyweight</span>' : '<span class="value">'.concat(e.equipment === "bodyweight" ? "+" : "").concat(A.kg(t.weight), '<span class="unit">kg').concat(e.equipment === "dumbbell" ? " / hand" : "", "</span></span>"), '<span class="times">×</span><span class="value">').concat(t.reps, '<span class="unit">').concat(e.type === "timed" && !t.warmup ? "sec" : "reps", "</span></span></div>").concat(e.type === "timed" && !t.warmup ? '<div class="notice info">'.concat(I("clock", "sm"), " Target duration <b>").concat(t.reps, " seconds</b>. The app runs the countdown, alerts you at zero and logs the actual hold.</div>") : "").concat(e.type === "bodyweight" && ["pull-ups", "dips"].includes(e.id) ? '<p class="form-hint">Total load: '.concat(E.bodyweight(s) ? A.kg(E.bodyweight(s) + t.weight) + " kg (body weight + added load)" : "log your body weight to see total load", ".</p>") : "", '<div class="last-set"><span class="eyebrow" style="font-size:8px;display:block;margin-bottom:5px">LAST SESSION · SET ').concat(t.setIndex, "</span>").concat(last && !t.warmup ? "<strong>".concat(h(A.load(e, last.weight, last.reps)), "</strong>").concat(last.rir !== null ? " · " + last.rir + " RIR" : "") : "No previous working set. Start conservatively.", "</div>").concat(e.type === "timed" && !t.warmup ? '<button class="btn primary full jumbo" data-action="work-start" '.concat(timer || pending || work ? "disabled" : "", ">").concat(I("timer"), " Start ").concat(t.reps, '-second timer <span style="font-size:11px;font-weight:500;margin-left:auto">').concat(work ? "Timer is running" : timer ? "Rest is running" : pending ? "Confirm your last set" : "Countdown, alert, then log", "</span></button>") : '<button class="btn primary full jumbo" data-action="set-done" '.concat(timer || pending || work ? "disabled" : "", ">").concat(I("check"), ' Set done <span style="font-size:11px;font-weight:500;margin-left:auto">').concat(timer ? "Rest is running" : pending ? "Confirm your last set" : t.transition ? "Next exercise · " + t.restAfter + "s" : "Start " + A.time(t.restAfter) + " rest", "</span></button>"), '<div class="set-actions"><button class="link-btn" data-action="unavailable" data-entry="').concat(t.entryId, '">').concat(I("swap", "sm"), 'Unavailable today</button><button class="link-btn" data-action="skip-exercise" data-entry="').concat(t.entryId, '">').concat(I("skip", "sm"), "Skip today</button></div></section>");
     } else if (!pending) {
       main += '<section class="card session-complete"><div class="success-emblem">'.concat(I("check", "lg"), '</div><span class="eyebrow green">WORK DONE. PROGRESS EARNED.</span><h2 style="margin-top:12px">That’s a wrap.</h2><p>').concat(completed, ' working sets logged. Finish and save your workout to review your next targets.</p><textarea id="finish-note" placeholder="Session note · sleep, mood, how it felt…" aria-label="Session note">').concat(h(session.note), '</textarea><button class="btn primary full jumbo" data-action="commit" style="margin-top:16px">COMMIT ').concat(I("check"), '<span style="font-size:11px;font-weight:500">Finish & save workout</span></button></section>');
     }
@@ -901,7 +1044,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     const s = A.s(), p = A.ui.planned;
     const list = p.groups.map((group, i) => '<section class="card plan-group"><div class="plan-group-head"><span>'.concat(group.length > 1 ? I("layers", "sm") + " " + (group.length === 3 ? "TRIPLE SET" : "SUPERSET") : I("workout", "sm") + " STRAIGHT SET", " ").concat(String(i + 1).padStart(2, "0"), "</span><span>").concat(Math.max(...group.map((id) => E.rest(s, E.ex(s, p.entries.find((en) => en.id === id).exerciseId)))), " SEC REST</span></div>").concat(group.map((id, j) => {
       const en = p.entries.find((e2) => e2.id === id), e = E.ex(s, en.exerciseId);
-      return '<div class="plan-ex-row"><div class="exercise-num">'.concat(group.length > 1 ? "ABC"[j] : I("workout", "sm"), '</div><div class="grow"><h4>').concat(h(e.name), " ").concat(e.compound ? '<span class="badge orange" style="font-size:8px">COMPOUND</span>' : "", "</h4><small>").concat(en.sets, " sets · ").concat(e.min, "–").concat(e.max).concat(e.type === "timed" ? " sec" : " reps").concat(s.settings.warmups && e.warmup ? " + 3 warm-ups" : "").concat(e.equipment === "dumbbell" ? " · per hand" : "", "</small>").concat(e.note ? '<p class="form-hint">'.concat(I("note", "sm"), " ").concat(h(e.note), "</p>") : "", '</div><div class="text-right"><div class="load">').concat(h(A.load(e, en.targetWeight, en.targetReps)), '</div><button class="link-btn" data-action="target-edit" data-id="').concat(e.id, '" style="font-size:9px">Edit target ').concat(I("edit", "sm"), "</button></div></div>");
+      return '<div class="plan-ex-row"><div class="exercise-num">'.concat(group.length > 1 ? "ABC"[j] : I("workout", "sm"), '</div><div class="grow"><h4>').concat(h(e.name), " ").concat(e.compound ? '<span class="badge orange" style="font-size:8px">COMPOUND</span>' : "", "</h4><small>").concat(en.sets, " sets · ").concat(e.min, "–").concat(e.max).concat(e.type === "timed" ? " sec" : " reps").concat(s.settings.warmups && e.warmup ? " + 3 warm-ups" : "").concat(e.equipment === "dumbbell" ? " · per hand" : "", "</small>").concat(e.note ? '<p class="form-hint">'.concat(I("note", "sm"), " ").concat(h(e.note), "</p>") : "", '</div><div class="text-right"><div class="load">').concat(h(A.load(e, en.targetWeight, en.targetReps)), "</div>").concat(en.manualTarget ? '<span class="badge orange">MANUAL</span> ' : "", '<button class="link-btn" data-action="target-edit" data-id="').concat(e.id, '" style="font-size:9px">Edit target ').concat(I("edit", "sm"), "</button></div></div>");
     }).join(""), "</section>")).join("");
     return header("Your session, streamlined.", "Heavy lifts first. Compatible supersets. Nothing left to guess.", '<button class="btn ghost sm" data-action="nav" data-route="today">'.concat(I("left", "sm"), "Change focus</button>"), "THE PLAN") + '<div class="layout-two"><div class="stack"><div class="metrics">'.concat(A.metric("clock", A.minutes(p.seconds), "Estimated duration", "min")).concat(A.metric("layers", p.workingSets, "Working sets", "sets")).concat(A.metric("bolt", p.savedSeconds ? A.minutes(p.savedSeconds) : 0, "Planned time saved", "min"), "</div>").concat(p.overBudget ? '<div class="notice">Your final compound alone exceeds this budget. It is kept rather than silently dropping the entire workout.</div>' : "").concat(p.dropped.length ? '<div class="notice info">Time budget: '.concat(p.dropped.map((id) => h(E.ex(s, id).name)).join(", "), " left out today. No progression penalty.</div>") : "", '<div class="plan-list">').concat(list, '</div></div><aside class="stack side-stack"><section class="card"><span class="eyebrow accent">TODAY’S FOCUS</span><h3 style="margin-top:12px">').concat(s.settings.selectedBlocks.map((id) => {
       var _a;
@@ -919,7 +1062,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     }).join(""), "</section>") : "";
     const next = s.exercises.filter((x) => x.active && x.primary && (A.ui.previewBlock === "all" || x.block === A.ui.previewBlock)).sort((a, b) => a.order - b.order).map((x) => {
       const t = E.target(s, x);
-      return '<div class="next-target"><div class="grow"><strong>'.concat(h(x.name), "</strong><small>").concat(x.sets, " sets · ").concat(t.configured ? "saved target" : "starting load not confirmed", '</small></div><span class="load">').concat(h(A.load(x, t.weight, t.reps)), '</span><button data-action="target-edit" data-id="').concat(x.id, '" aria-label="Edit ').concat(h(x.name), ' target">').concat(I("edit", "sm"), "</button></div>");
+      return '<div class="next-target"><div class="grow"><strong>'.concat(h(x.name), " ").concat(A.targetFlags(t), "</strong><small>").concat(x.sets, " sets · ").concat(t.configured ? t.manual ? "manual override, saved exactly as entered" : "saved target" : "starting load not confirmed", '</small></div><span class="load">').concat(h(A.load(x, t.weight, t.reps)), '</span><button data-action="target-edit" data-id="').concat(x.id, '" aria-label="Edit ').concat(h(x.name), ' target">').concat(I("edit", "sm"), "</button></div>");
     }).join("");
     const committed = A.ui.lastCommitted ? s.sessions.find((x) => x.id === A.ui.lastCommitted) : null;
     const maxVolume = Math.max(12, ...Object.values(volume));
@@ -951,14 +1094,14 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     const tabs = ["all", ...A.Seed.blocks.map((b) => b.id)].map((id) => '<button class="tab '.concat(A.ui.libraryBlock === id ? "active" : "", '" data-action="library-filter" data-id="').concat(id, '">').concat(id === "all" ? "All exercises" : A.block(id).short, "</button>")).join("");
     const cards = list.map((e) => {
       const b = A.block(e.block), t = E.target(s, e);
-      return '<section class="card exercise-card"><div class="between"><span class="badge" style="color:'.concat((b == null ? void 0 : b.color) || "#aaa", '">').concat(h(e.muscle), '</span><button class="icon-btn" style="height:29px;width:29px;border:0" data-action="analyze" data-id="').concat(e.id, '" aria-label="Analyze ').concat(h(e.name), '">').concat(I("chart", "sm"), "</button></div><h3>").concat(h(e.name)).concat(!e.active ? ' <span class="soft">(archived)</span>' : "", '</h3><div class="tags"><span>').concat(e.sets, " sets</span><span>").concat(e.min, "–").concat(e.max, " ").concat(e.type === "timed" ? "sec" : "reps", "</span><span>").concat(h(e.equipmentTag || e.equipment), "</span><span>").concat(E.rest(s, e), "s rest</span>").concat(!e.primary ? "<span>substitute</span>" : "", '</div><div class="exercise-card-footer"><div><small>Next target</small><strong style="display:block">').concat(t.configured ? h(A.load(e, t.weight, t.reps)) : "Set starting load", '</strong></div><button class="btn ghost sm" data-action="exercise-edit" data-id="').concat(e.id, '">').concat(I("edit", "sm"), 'Edit</button></div><div class="reorder-buttons"><button data-action="exercise-reorder" data-id="').concat(e.id, '" data-delta="-1" aria-label="Move ').concat(h(e.name), ' earlier">↑ Earlier</button><button data-action="exercise-reorder" data-id="').concat(e.id, '" data-delta="1" aria-label="Move ').concat(h(e.name), ' later">↓ Later</button></div></section>');
+      return '<section class="card exercise-card"><div class="between"><span class="badge" style="color:'.concat((b == null ? void 0 : b.color) || "#aaa", '">').concat(h(e.muscle), '</span><button class="icon-btn" style="height:29px;width:29px;border:0" data-action="analyze" data-id="').concat(e.id, '" aria-label="Analyze ').concat(h(e.name), '">').concat(I("chart", "sm"), "</button></div><h3>").concat(h(e.name)).concat(!e.active ? ' <span class="soft">(archived)</span>' : "", '</h3><div class="tags"><span>').concat(e.sets, " sets</span><span>").concat(e.min, "–").concat(e.max, " ").concat(e.type === "timed" ? "sec" : "reps", "</span><span>").concat(h(e.equipmentTag || e.equipment), "</span><span>").concat(E.rest(s, e), "s rest</span>").concat(!e.primary ? "<span>substitute</span>" : "", '</div><div class="exercise-card-footer"><div><small>Next target</small><strong style="display:block">').concat(t.configured ? h(A.load(e, t.weight, t.reps)) : "Set starting load", "</strong>").concat(A.targetFlags(t), '</div><button class="btn ghost sm" data-action="exercise-edit" data-id="').concat(e.id, '">').concat(I("edit", "sm"), 'Edit</button></div><div class="reorder-buttons"><button data-action="exercise-reorder" data-id="').concat(e.id, '" data-delta="-1" aria-label="Move ').concat(h(e.name), ' earlier">↑ Earlier</button><button data-action="exercise-reorder" data-id="').concat(e.id, '" data-delta="1" aria-label="Move ').concat(h(e.name), ' later">↓ Later</button></div></section>');
     }).join("");
     return header("Your routine. Your rules.", "Every exercise, target, substitute, and pairing is editable.", '<button class="btn primary sm" data-action="exercise-add">'.concat(I("plus", "sm"), "Add exercise</button>"), "THE EXERCISE LIBRARY") + '<div class="section-tabs">'.concat(tabs, '</div><div class="library-tools"><div class="search-wrap">').concat(I("search"), '<input id="exercise-search" type="search" placeholder="Find an exercise…" value="').concat(h(A.ui.search), '" aria-label="Search exercises"></div><label class="check-label"><input type="checkbox" id="show-subs" ').concat(A.ui.showSubs ? "checked" : "", '>Substitutes</label><label class="check-label"><input type="checkbox" id="show-archived" ').concat(A.ui.showArchived ? "checked" : "", '>Archived</label><span class="soft" style="font-size:10px;margin-left:auto">').concat(list.length, ' exercises</span></div><div class="library-grid">').concat(cards, "</div>").concat(!list.length ? A.empty("search", "No exercises found.", "Try another name, or include substitutes and archived exercises.") : "");
   };
   A.pages.settings = () => {
     const s = A.s(), cfg = s.settings, permissions = A.Store.permissions();
     const num = (id, label, desc, min, max) => '<div class="setting-row"><div><strong>'.concat(label, "</strong><small>").concat(desc, '</small></div><input type="number" id="setting-').concat(id, '" value="').concat(cfg[id], '" min="').concat(min, '" max="').concat(max, '" inputmode="numeric" aria-label="').concat(label, '"></div>');
-    return header("Set it up your way.", "Built for your equipment, your schedule, and your next rep.", "", "THE DETAILS THAT MATTER") + '<div class="settings-grid"><div class="stack"><section class="card"><div class="card-title">'.concat(I("timer"), '<h3>Rest & transitions</h3></div><p class="card-desc">Heavy 6–10-rep lifts default to 150 seconds. Each exercise can override this global default.</p>').concat(num("rest", "Default rest", "Seconds · used without an exercise override", 0, 1800)).concat(num("transition", "Superset transition", "Seconds between exercises A and B", 0, 120)).concat(num("warmupRest", "Warm-up rest", "Seconds after each ramp set", 0, 300), '<div class="setting-save"><button class="btn secondary sm" data-action="save-timers">Save timer defaults ').concat(I("check", "sm"), "</button></div>").concat(A.switch("sound", "Completion sound", "A short two-tone cue when your timer ends.")).concat(A.switch("vibrate", "Completion vibration", "Feel the cue without watching the screen.")).concat(A.switch("keepAwake", "Keep screen awake", "On while a session is active and Forge is open."), '<button class="link-btn" data-action="test-alert">').concat(I("bell", "sm"), 'Test completion alert</button></section><section class="card"><div class="card-title">').concat(I("layers"), '<h3>Training preferences</h3></div><p class="card-desc">Small details that keep the session moving.</p>').concat(A.switch("warmups", "Warm-up ramps", "3 loadable ramp sets before the five main compounds.")).concat(A.switch("triples", "Allow triple sets", "Only if every pair in the triple is compatible.")).concat(A.switch("effort", "Optional effort rating", "Log 0, 1, 2, or 3+ reps left after a working set.")).concat(num("safeJump", "Safe-jump cap", "Maximum suggested increase in percent", 1, 100)).concat(num("stallSessions", "Stall window", "Complete sessions with no improvement", 2, 20), '<div class="setting-save"><button class="btn secondary sm" data-action="save-progression">Save progression preferences</button></div></section><section class="card"><div class="card-title">').concat(I("swap"), '<h3>Pairing rules</h3></div><p class="card-desc">Forge follows your table, not guesses about muscles. Substitutes inherit their source exercise’s group. Deadlift, Squats, and Farmer Carries remain solo.</p><button class="btn ghost full" data-action="pairing">').concat(I("layers", "sm"), 'Edit allowed pairings</button></section></div><div class="stack"><section class="card"><div class="card-title">').concat(I("workout"), '<h3>Your loadable weights</h3></div><p class="card-desc">Every target rounds to weights you actually have. Dumbbell weights are per hand; barbell plates are entered as pairs.</p><div class="summary-values"><div class="summary-line"><span>Bar weight</span><strong>').concat(A.kg(cfg.barWeight), ' kg</strong></div><div class="summary-line"><span>Plate denominations</span><strong>').concat(cfg.plates.length, '</strong></div><div class="summary-line"><span>Dumbbell options</span><strong>').concat(cfg.dumbbells.length, '</strong></div><div class="summary-line"><span>Cable stack options</span><strong>').concat(cfg.cables.length, '</strong></div></div><button class="btn ghost full" data-action="equipment">').concat(I("edit", "sm"), 'Configure equipment</button></section><section class="card"><div class="card-title">').concat(I("bell"), '<h3>Training reminders</h3></div><p class="card-desc">Optional local notifications. No messages, no server. ').concat(A.Store.native ? "" : "Android APK required for reliable reminders.", '</p><div class="reminder-days">').concat([1, 2, 3, 4, 5, 6, 0].map((d, i) => '<button class="reminder-day '.concat(cfg.reminders.days.includes(d) ? "selected" : "", '" data-action="reminder-day" data-day="').concat(d, '" aria-label="').concat(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][i], '">').concat(["M", "T", "W", "T", "F", "S", "S"][i], "</button>")).join(""), '</div><label class="field-label" for="reminder-time">Local time</label><input type="time" id="reminder-time" value="').concat(cfg.reminders.time, '"><p class="form-hint">').concat(cfg.reminders.days.length ? cfg.reminders.days.length + " day(s) selected." : "Off. Select a day to enable.", '</p></section><section class="card"><div class="card-title">').concat(I("shield"), '<h3>Background readiness</h3></div><p class="card-desc">').concat(A.Store.native ? "A native foreground timer and wake lock keep countdowns running with the screen off. An exact alarm is a process-kill fallback." : "This browser is an interactive preview. Install the APK for native screen-off timers, sound, vibration, and scheduled reminders.", '</p><div class="setting-row"><div><strong>Notifications</strong><small>').concat(permissions.notifications ? "Allowed" : "Allow for timer status and reminders", '</small></div><button class="btn ghost sm" data-action="notification-permission">').concat(permissions.notifications ? "Review" : "Allow", '</button></div><div class="setting-row"><div><strong>Exact alarm fallback</strong><small>').concat(permissions.exact ? "Allowed" : "Recommended for timer recovery if Android kills the app", '</small></div><button class="btn ghost sm" data-action="alarm-permission">').concat(permissions.exact ? "Review" : "Allow", '</button></div><p class="form-hint">Android “Force stop” disables timers and reminders. Some manufacturers require unrestricted battery use; test one timer with the screen off.</p></section><section class="card"><div class="card-title">').concat(I("download"), '<h3>Backup & restore</h3></div><p class="card-desc">Your entire workspace in one JSON file: exercises, settings, targets, every set, and your active session. Keep a copy somewhere safe.</p><div class="backup-buttons"><button class="btn secondary" data-action="export">').concat(I("download", "sm"), 'Export JSON</button><button class="btn ghost" data-action="import">').concat(I("upload", "sm"), 'Restore JSON</button></div></section><section class="card"><div class="card-title">').concat(I("info"), '<h3>Forge 1.0</h3></div><p class="card-desc">Personal-use training. No network permission, login, advertising, or analytics. Android stores data in private SQLite. Browser preview uses this browser’s local storage.</p><button class="link-btn" data-action="help">How progression works ').concat(I("arrow", "sm"), "</button></section></div></div>");
+    return header("Set it up your way.", "Built for your equipment, your schedule, and your next rep.", "", "THE DETAILS THAT MATTER") + '<div class="settings-grid"><div class="stack"><section class="card"><div class="card-title">'.concat(I("timer"), '<h3>Rest & transitions</h3></div><p class="card-desc">Heavy 6–10-rep lifts default to 150 seconds. Each exercise can override this global default.</p>').concat(num("rest", "Default rest", "Seconds · used without an exercise override", 0, 1800)).concat(num("transition", "Superset transition", "Seconds between exercises A and B", 0, 120)).concat(num("warmupRest", "Warm-up rest", "Seconds after each ramp set", 0, 300), '<div class="setting-save"><button class="btn secondary sm" data-action="save-timers">Save timer defaults ').concat(I("check", "sm"), "</button></div>").concat(A.switch("sound", "Completion sound", "A short two-tone cue when your timer ends.")).concat(A.switch("vibrate", "Completion vibration", "Feel the cue without watching the screen.")).concat(A.switch("keepAwake", "Keep screen awake", "On while a session is active and Forge is open."), '<button class="link-btn" data-action="test-alert">').concat(I("bell", "sm"), 'Test completion alert</button></section><section class="card"><div class="card-title">').concat(I("layers"), '<h3>Training preferences</h3></div><p class="card-desc">Small details that keep the session moving.</p>').concat(A.switch("warmups", "Warm-up ramps", "3 loadable ramp sets before the five main compounds.")).concat(A.switch("triples", "Allow triple sets", "Only if every pair in the triple is compatible.")).concat(A.switch("effort", "Optional effort rating", "Log 0, 1, 2, or 3+ reps left after a working set.")).concat(num("safeJump", "Safe-jump cap", "Maximum suggested increase in percent", 1, 100)).concat(num("stallSessions", "Stall window", "Complete sessions with no improvement", 2, 20), '<div class="setting-save"><button class="btn secondary sm" data-action="save-progression">Save progression preferences</button></div></section><section class="card"><div class="card-title">').concat(I("swap"), '<h3>Pairing rules</h3></div><p class="card-desc">Forge follows your table, not guesses about muscles. Substitutes inherit their source exercise’s group. Deadlift, Squats, and Farmer Carries remain solo.</p><button class="btn ghost full" data-action="pairing">').concat(I("layers", "sm"), 'Edit allowed pairings</button></section></div><div class="stack"><section class="card"><div class="card-title">').concat(I("workout"), '<h3>Your loadable weights</h3></div><p class="card-desc">Every target rounds to weights you actually have. Dumbbell weights are per hand; barbell plates are entered as pairs.</p><div class="summary-values"><div class="summary-line"><span>Bar weight</span><strong>').concat(A.kg(cfg.barWeight), ' kg</strong></div><div class="summary-line"><span>Plate denominations</span><strong>').concat(cfg.plates.length, '</strong></div><div class="summary-line"><span>Dumbbell options</span><strong>').concat(cfg.dumbbells.length, '</strong></div><div class="summary-line"><span>Cable stack options</span><strong>').concat(cfg.cables.length, '</strong></div></div><button class="btn ghost full" data-action="equipment">').concat(I("edit", "sm"), 'Configure equipment</button></section><section class="card"><div class="card-title">').concat(I("bell"), '<h3>Training reminders</h3></div><p class="card-desc">Optional local notifications. No messages, no server. ').concat(A.Store.native ? "" : "Android APK required for reliable reminders.", '</p><div class="reminder-days">').concat([1, 2, 3, 4, 5, 6, 0].map((d, i) => '<button class="reminder-day '.concat(cfg.reminders.days.includes(d) ? "selected" : "", '" data-action="reminder-day" data-day="').concat(d, '" aria-label="').concat(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][i], '">').concat(["M", "T", "W", "T", "F", "S", "S"][i], "</button>")).join(""), '</div><label class="field-label" for="reminder-time">Local time</label><input type="time" id="reminder-time" value="').concat(cfg.reminders.time, '"><p class="form-hint">').concat(cfg.reminders.days.length ? cfg.reminders.days.length + " day(s) selected." : "Off. Select a day to enable.", '</p></section><section class="card"><div class="card-title">').concat(I("shield"), '<h3>Background readiness</h3></div><p class="card-desc">').concat(A.Store.native ? "A native foreground timer and wake lock keep countdowns running with the screen off. An exact alarm is a process-kill fallback." : "This browser is an interactive preview. Install the APK for native screen-off timers, sound, vibration, and scheduled reminders.", '</p><div class="setting-row"><div><strong>Notifications</strong><small>').concat(permissions.notifications ? "Allowed" : "Allow for timer status and reminders", '</small></div><button class="btn ghost sm" data-action="notification-permission">').concat(permissions.notifications ? "Review" : "Allow", '</button></div><div class="setting-row"><div><strong>Exact alarm fallback</strong><small>').concat(permissions.exact ? "Allowed" : "Recommended for timer recovery if Android kills the app", '</small></div><button class="btn ghost sm" data-action="alarm-permission">').concat(permissions.exact ? "Review" : "Allow", '</button></div><p class="form-hint">Android “Force stop” disables timers and reminders. Some manufacturers require unrestricted battery use; test one timer with the screen off.</p></section><section class="card"><div class="card-title">').concat(I("download"), '<h3>Backup & restore</h3></div><p class="card-desc">Your entire workspace in one JSON file: exercises, settings, targets, every set, and your active session. Keep a copy somewhere safe.</p><div class="backup-buttons"><button class="btn secondary" data-action="export">').concat(I("download", "sm"), 'Export JSON</button><button class="btn ghost" data-action="import">').concat(I("upload", "sm"), 'Restore JSON</button></div><hr class="card-rule"><div class="between"><div class="grow"><strong>Previous workspace</strong><small>The state saved just before your latest save, kept on this device only.</small></div><button class="btn ghost sm" data-action="recover-previous">').concat(I("undo", "sm"), 'Inspect</button></div></section><section class="card"><div class="card-title">').concat(I("info"), '<h3>Forge 1.0</h3></div><p class="card-desc">Personal-use training. No network permission, login, advertising, or analytics. Android stores data in private SQLite. Browser preview uses this browser’s local storage.</p><button class="link-btn" data-action="help">How progression works ').concat(I("arrow", "sm"), "</button></section></div></div>");
   };
 })(window);
 (function(root) {
@@ -973,12 +1116,36 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       var _a;
       const e = E.ex(s, id), t = E.target(s, e);
       return '<div class="setup-row"><div><strong>'.concat(h(e.name), "</strong><small>").concat(h(e.equipment), " · ").concat(e.min, "–").concat(e.max, " ").concat(e.type === "timed" ? "sec" : "reps", '</small></div><div class="input-unit"><input class="start-weight" data-id="').concat(id, '" type="number" min="0" max="1000" step=".25" inputmode="decimal" placeholder="?" value="').concat((_a = s.targets[id].weight) != null ? _a : "", '" aria-label="').concat(h(e.name), ' starting weight"><span>kg</span></div></div>');
-    }).join(""), '</div><p class="form-hint">Targets round to your configured loadable weights. You can change them at any time. An empty bar may be the lightest available warm-up.</p>'), close + '<button class="btn primary" data-action="save-starts">Save starting weights ' + I("arrow", "sm") + "</button>", { ids, purpose, entryId });
+    }).join(""), '</div><p class="form-hint">Starting loads you type are saved exactly as entered. “Suggest conservative starts” fills loads that already round to your equipment. You can change them at any time. An empty bar may be the lightest available warm-up.</p>'), close + '<button class="btn primary" data-action="save-starts">Save starting weights ' + I("arrow", "sm") + "</button>", { ids, purpose, entryId });
   };
   A.openTarget = (id, suggestion = false) => {
     const s = A.s(), e = E.ex(s, id), t = E.target(s, e), sug = s.suggestions[id];
     const weight = suggestion && sug ? sug.weight : t.weight, reps = suggestion && sug ? sug.reps : t.reps;
-    A.dialog("target", h(e.name), '<p class="intro">Set the next target. Load rounds to your equipment. This is an explicit override; no weight increase is applied without your approval.</p>'.concat(suggestion && sug ? '<div class="notice info" style="margin-bottom:18px">'.concat(h(sug.reason), "</div>") : "", '<div class="form-grid"><label><span class="field-label">').concat(e.equipment === "bodyweight" ? "Added weight" : "Weight", " · kg ").concat(e.equipment === "dumbbell" ? "per hand" : "", '</span><input id="target-weight" type="number" min="0" max="1000" step=".25" inputmode="decimal" value="').concat(weight, '"></label><label><span class="field-label">').concat(e.type === "timed" ? "Seconds" : "Target reps", " · ").concat(e.min, "–").concat(e.max, '</span><input id="target-reps" type="number" min="').concat(e.min, '" max="').concat(e.max, '" step="1" inputmode="numeric" value="').concat(reps, '"></label></div><p class="form-hint">Current range: ').concat(e.min, "–").concat(e.max, ". Edit the exercise to change its range or available increment.</p>"), close + '<button class="btn primary" data-action="save-target">Save target ' + I("check", "sm") + "</button>", { id, suggestion });
+    const loads = E.loadable(s, e);
+    const nearest = [...loads].sort((a, b) => Math.abs(a - Number(weight)) - Math.abs(b - Number(weight))).slice(0, 4);
+    const unitLabel = e.type === "timed" ? "Seconds" : "Target reps";
+    A.dialog("target", h(e.name), '<p class="intro">Set the next target for this lift. Values you enter are saved <b>exactly</b>: not rounded to your equipment and not clamped to the exercise range.</p>'.concat(suggestion && sug ? '<div class="notice info" style="margin-bottom:18px">'.concat(h(sug.reason), "</div>") : "").concat(t.manual ? '<div class="notice info" style="margin-bottom:18px">'.concat(I("edit", "sm"), " Current manual override: ").concat(h(A.load(e, t.weight, t.reps)), ", saved exactly as entered.</div>") : "", '<div class="form-grid"><label><span class="field-label">').concat(e.equipment === "bodyweight" ? "Added weight" : "Weight", " · kg ").concat(e.equipment === "dumbbell" ? "per hand" : "", '</span><input id="target-weight" type="number" min="').concat(E.LIMITS.weight.min, '" max="').concat(E.LIMITS.weight.max, '" step="any" inputmode="decimal" value="').concat(weight, '" aria-label="Target weight in kilograms"></label><label><span class="field-label">').concat(unitLabel, " · normal range ").concat(e.min, "–").concat(e.max, '</span><input id="target-reps" type="number" min="').concat(E.LIMITS.reps.min, '" max="').concat(E.LIMITS.reps.max, '" step="1" inputmode="numeric" value="').concat(reps, '" aria-label="').concat(unitLabel, '"></label></div><p class="form-hint">Absolute limits: ').concat(E.LIMITS.weight.min, "–").concat(E.LIMITS.weight.max, " kg and ").concat(E.LIMITS.reps.min, "–").concat(E.LIMITS.reps.max, " ").concat(e.type === "timed" ? "seconds" : "reps", ". Anything inside those limits is kept as a manual override; the ").concat(e.min, "–").concat(e.max, " range only guides automatic progression.").concat(nearest.length ? " Closest saved loads: " + nearest.map((v) => A.kg(v) + " kg").join(", ") + "." : "", "</p>"), close + '<button class="btn primary" data-action="save-target">Save target ' + I("check", "sm") + "</button>", { id, suggestion });
+  };
+  A.openRecovery = () => {
+    const info = A.Store.previous();
+    if (!info.available) {
+      A.dialog("recovery", "No previous workspace yet.", '<p class="intro">Forge keeps a recovery copy of the state saved just before your most recent save. Nothing has been saved twice yet, so there is nothing to recover.'.concat(info.error ? " The recovery store reported: " + h(info.error) : "", "</p>"), '<button class="btn primary" data-action="close-modal">Close '.concat(I("check", "sm"), "</button>"));
+      return;
+    }
+    let parsed = null, problem = null;
+    try {
+      parsed = JSON.parse(info.text);
+      E.validate(parsed);
+    } catch (e) {
+      problem = e.message;
+    }
+    const when = info.modified ? A.fullDate(info.modified) + " at " + new Date(info.modified).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "time unknown";
+    if (problem) {
+      A.dialog("recovery", "That recovery copy is not usable.", '<p class="intro">Saved '.concat(h(when), '. It failed validation, so it cannot be restored:</p><div class="notice">').concat(h(problem), '</div><p class="form-hint">Your current workspace has not been touched. Use Export JSON to keep a healthy copy.</p>'), '<button class="btn primary" data-action="close-modal">Keep my current data '.concat(I("check", "sm"), "</button>"));
+      return;
+    }
+    const manual = Object.values(parsed.targets || {}).filter((t) => t && t.manual === true).length;
+    A.dialog("recovery", "Restore the previous workspace?", '<div class="notice info" style="margin-bottom:16px">'.concat(I("clock", "sm"), " Saved ").concat(h(when), " · ").concat(h(parsed.updatedAt ? A.date(parsed.updatedAt) : "unknown date"), '</div><div class="summary-values"><div class="summary-line"><span>Exercises</span><strong>').concat(parsed.exercises.length, '</strong></div><div class="summary-line"><span>Saved sessions</span><strong>').concat(parsed.sessions.length, '</strong></div><div class="summary-line"><span>Body weight entries</span><strong>').concat(parsed.bodyweights.length, '</strong></div><div class="summary-line"><span>Manual target overrides</span><strong>').concat(manual, '</strong></div><div class="summary-line"><span>Active workout</span><strong>').concat(parsed.session ? "Yes · will resume" : "No", '</strong></div></div><div class="notice">Restoring is all-or-nothing and stays on this device. The workspace you are using now becomes the new recovery copy, so you can come back to it.</div>'), '<button class="btn ghost" data-action="close-modal">Cancel</button><button class="btn primary" data-action="recover-confirm">Restore previous workspace '.concat(I("undo", "sm"), "</button>"), { text: info.text }, true);
   };
   A.openExercise = (id = null) => {
     var _a;
@@ -1030,6 +1197,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
 })(window);
 (function(root) {
   "use strict";
+  var _a;
   const A = root.ForgeApp, E = A.E, h = A.escape, I = A.icon;
   const $ = (id) => document.getElementById(id);
   const n = (id, min, max, integer = false) => {
@@ -1040,9 +1208,18 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     return value;
   };
   let audio, wakeLock, requestingWake = false;
+  const wantsScreenAwake = () => !!(A.s().session && A.s().settings.keepAwake);
   A.screenAwake = async () => {
-    if (A.Store.native || !navigator.wakeLock) return;
-    if (A.s().session && A.s().settings.keepAwake && document.visibilityState === "visible") {
+    const keep = wantsScreenAwake();
+    if (A.Store.native) {
+      try {
+        root.Native.keepScreenAwake(keep);
+      } catch (e) {
+      }
+      return;
+    }
+    if (!navigator.wakeLock) return;
+    if (keep && document.visibilityState === "visible") {
       if (wakeLock && !wakeLock.released || requestingWake) return;
       requestingWake = true;
       try {
@@ -1091,20 +1268,48 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     }
   };
   A.scheduleTimer = () => {
-    var _a;
-    const s = A.s(), timer = (_a = s.session) == null ? void 0 : _a.timer;
+    var _a2;
+    const s = A.s(), timer = (_a2 = s.session) == null ? void 0 : _a2.timer;
     if (!timer) return;
     const task = s.session.queue[0];
     const label = task ? E.ex(s, task.exerciseId).name + " · " + A.load(E.ex(s, task.exerciseId), task.weight, task.reps) : "Last set complete · confirm and COMMIT";
-    if (A.Store.native) root.Native.startTimer(Math.round(timer.deadline), timer.kind, label, s.settings.sound, s.settings.vibrate);
+    if (A.Store.native) root.Native.startTimer(Math.round(timer.deadline), timer.kind, label, s.settings.sound, s.settings.vibrate, "rest");
     else enableAudio();
   };
   A.cancelTimer = () => {
-    if (A.Store.native) root.Native.cancelTimer();
+    if (A.Store.native) root.Native.cancelTimer("rest");
     if (A.s().session) A.s().session.timer = null;
   };
+  A.scheduleWorkTimer = () => {
+    var _a2;
+    const s = A.s(), timer = (_a2 = s.session) == null ? void 0 : _a2.workTimer;
+    if (!timer) return;
+    const e = E.ex(s, timer.exerciseId);
+    const label = (e ? e.name + " · " : "") + "hold " + A.time(timer.total);
+    if (A.Store.native) root.Native.startTimer(Math.round(timer.deadline), "work", label, s.settings.sound, s.settings.vibrate, "work");
+    else enableAudio();
+  };
+  A.cancelWorkTimer = () => {
+    if (A.Store.native) root.Native.cancelTimer("work");
+    if (A.s().session) A.s().session.workTimer = null;
+  };
+  const workElapsed = (timer) => Math.max(0, Math.min(timer.total, Math.round((Math.min(Date.now(), timer.deadline) - (timer.deadline - timer.total * 1e3)) / 1e3)));
+  A.finishWorkTimer = (options) => {
+    var _a2;
+    const s = A.s();
+    if (!((_a2 = s.session) == null ? void 0 : _a2.workTimer)) return null;
+    const result = E.finishWork(s, options || {});
+    if (!result) {
+      return null;
+    }
+    if (A.Store.native) root.Native.cancelTimer("work");
+    A.scheduleTimer();
+    A.save();
+    A.render();
+    return result;
+  };
   A.captureLog = (strict = false) => {
-    var _a;
+    var _a2;
     const sess = A.s().session, rec = sess == null ? void 0 : sess.records.find((r) => r.id === sess.pendingLogId);
     if (!rec || !$("log-reps")) return;
     if (strict) {
@@ -1115,7 +1320,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       if (Number.isInteger(rr) && rr >= 0 && rr <= 3600) rec.reps = rr;
       if (Number.isFinite(ww) && ww >= 0 && ww <= 1e3) rec.weight = ww;
     }
-    rec.note = ((_a = $("log-note")) == null ? void 0 : _a.value.slice(0, 2e3)) || "";
+    rec.note = ((_a2 = $("log-note")) == null ? void 0 : _a2.value.slice(0, 2e3)) || "";
     if ($("log-failed")) rec.failed = $("log-failed").checked;
   };
   A.buildPlan = () => {
@@ -1134,8 +1339,8 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     if (A.Store.native) root.Native.setReminders(JSON.stringify(A.s().settings.reminders));
   };
   const refreshActiveTimer = () => {
-    var _a;
-    if ((_a = A.s().session) == null ? void 0 : _a.timer) A.scheduleTimer();
+    var _a2;
+    if ((_a2 = A.s().session) == null ? void 0 : _a2.timer) A.scheduleTimer();
   };
   const confirmPending = () => {
     const sess = A.s().session, rec = sess == null ? void 0 : sess.records.find((r) => r.id === sess.pendingLogId);
@@ -1151,12 +1356,14 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     confirmPending();
     if ($("finish-note")) sess.note = $("finish-note").value.slice(0, 5e3);
     A.cancelTimer();
+    A.cancelWorkTimer();
     const done = E.finishSession(A.s());
     A.ui.lastCommitted = done.id;
     A.ui.planned = null;
     const first = done.records.find((r) => !r.warmup);
     if (first) A.ui.progressExercise = first.exerciseId;
     A.save();
+    A.screenAwake();
     A.navigate("progress");
     A.toast("COMMITTED. Every set is saved.");
   };
@@ -1175,6 +1382,20 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       s.suggestions[e.id] = sug;
     }
   };
+  const applyTargetToSession = (id, weight, reps, manual) => {
+    const s = A.s(), session = s.session;
+    if (!session) return false;
+    let touched = false;
+    for (const en of session.entries) {
+      if (en.exerciseId !== id) continue;
+      en.targetWeight = weight;
+      en.targetReps = reps;
+      en.manualTarget = manual === true;
+      touched = true;
+    }
+    if (touched && !session.workTimer && !session.pendingLogId) session.queue = E.planEntries(s, session.entries, session.records).queue;
+    return touched;
+  };
   A.importData = (text) => {
     try {
       if (text.length > 64 * 1024 * 1024) throw new Error("Backup is larger than the 64 MB safety limit.");
@@ -1185,11 +1406,48 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       A.toast("Restore rejected: " + e.message, 7e3);
     }
   };
+  A.restorePreviousWorkspace = (text) => {
+    var _a2;
+    const parsed = JSON.parse(text);
+    E.validate(parsed);
+    A.captureLog();
+    A.Store.restorePrevious(text);
+    A.cancelTimer();
+    A.cancelWorkTimer();
+    A.Store.state = E.clone(parsed);
+    if (!A.Store.state.session) A.Store.state.session = null;
+    A.ui.planned = null;
+    A.ui.lastCommitted = null;
+    A.ui.progressExercise = ((_a2 = A.Store.state.exercises[0]) == null ? void 0 : _a2.id) || "bench-press";
+    const session = A.Store.state.session;
+    if (session) {
+      if (session.timer && session.timer.deadline <= Date.now()) session.timer = null;
+      if (session.workTimer && session.workTimer.deadline <= Date.now()) session.workTimer = null;
+    }
+    syncReminders();
+    if (session == null ? void 0 : session.timer) A.scheduleTimer();
+    if (session == null ? void 0 : session.workTimer) A.scheduleWorkTimer();
+    A.screenAwake();
+    A.render();
+    return A.Store.state;
+  };
   const actions = {
     "nav": (d) => {
       A.captureLog();
       A.save();
       A.navigate(d.route);
+    },
+    "recover-previous": () => A.openRecovery(),
+    "recover-confirm": () => {
+      const data = A.ui.modal.data;
+      try {
+        const restored = A.restorePreviousWorkspace(data.text);
+        A.close();
+        A.navigate(restored.session ? "session" : "today");
+        A.toast("Previous workspace restored. The workspace you were using is kept as the new recovery copy.", 7e3);
+      } catch (e) {
+        A.toast("Recovery failed: " + e.message + " Your current workspace is unchanged.", 9e3);
+      }
     },
     "close-modal": () => A.close(),
     "preview-info": () => A.previewInfo(),
@@ -1200,9 +1458,11 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       if (data.action === "commit-actual") commitActual();
       else if (data.action === "discard-session-actual") {
         A.cancelTimer();
+        A.cancelWorkTimer();
         A.s().session = null;
         A.ui.planned = null;
         A.save();
+        A.screenAwake();
         A.navigate("today");
         A.toast("Session discarded. Saved history is unchanged.");
       } else if (data.action === "reset-pairs-actual") {
@@ -1247,7 +1507,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       A.toast("Conservative suggestions filled. Review them before continuing.", 5e3);
     },
     "save-starts": () => {
-      const data = A.ui.modal.data;
+      const data = A.ui.modal.data, s = A.s();
       const values = [];
       document.querySelectorAll(".start-weight").forEach((input) => {
         if (input.value.trim() === "") throw new Error("Enter every weight, or use conservative starts.");
@@ -1255,16 +1515,20 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
         if (!Number.isFinite(w) || w < 0 || w > 1e3) throw new Error("Weights must be between 0 and 1,000 kg.");
         values.push([input.dataset.id, w]);
       });
-      values.forEach(([id, w]) => {
-        const e = E.ex(A.s(), id);
-        A.s().targets[id] = { weight: E.roundWeight(A.s(), e, w), reps: A.s().targets[id].reps };
-      });
+      for (const [id, w] of values) {
+        const e = E.ex(s, id), current = s.targets[id] || { reps: e.min };
+        const reps = Number.isInteger(Number(current.reps)) ? Math.min(3600, Math.max(1, Number(current.reps))) : e.min;
+        const result = E.setTarget(s, e, w, reps);
+        if (result.error) throw new Error(e.name + ": " + result.error);
+        applyTargetToSession(id, result.target.weight, result.target.reps, true);
+      }
       if (data.purpose === "substitute") {
-        const en = A.s().session.entries.find((x) => x.id === data.entryId);
-        const t = E.target(A.s(), E.ex(A.s(), en.exerciseId));
+        const en = s.session.entries.find((x) => x.id === data.entryId);
+        const t = E.target(s, E.ex(s, en.exerciseId));
         en.targetWeight = t.weight;
         en.targetReps = t.reps;
-        A.s().session.queue = E.planEntries(A.s(), A.s().session.entries, A.s().session.records).queue;
+        en.manualTarget = t.manual === true;
+        s.session.queue = E.planEntries(s, s.session.entries, s.session.records).queue;
       }
       A.save();
       A.close();
@@ -1287,14 +1551,54 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       if (A.Store.native && !A.Store.permissions().notifications) root.Native.requestNotifications();
     },
     "set-done": () => {
-      if (!A.s().session || A.s().session.pendingLogId || A.s().session.timer) return;
+      const s = A.s(), sess = s.session;
+      if (!sess || sess.pendingLogId || sess.timer || sess.workTimer) return;
+      const task = sess.queue[0], exercise = task && E.ex(s, task.exerciseId);
+      if (exercise && exercise.type === "timed" && !task.warmup) {
+        actions["work-start"]();
+        return;
+      }
       enableAudio();
-      const rec = E.completeSet(A.s());
+      const rec = E.completeSet(s);
       if (!rec) return;
       A.scheduleTimer();
       A.save();
       A.render();
       window.scrollTo({ top: 0, behavior: "smooth" });
+    },
+    "work-start": () => {
+      const s = A.s();
+      if (!s.session) return;
+      const result = E.startWork(s);
+      if (result.error) {
+        A.toast(result.error, 5e3);
+        return;
+      }
+      enableAudio();
+      A.scheduleWorkTimer();
+      A.save();
+      A.render();
+      A.toast(result.exercise.name + " · hold timer started for " + result.total + " seconds.", 2600);
+    },
+    "work-finish": () => {
+      var _a2;
+      const s = A.s(), timer = (_a2 = s.session) == null ? void 0 : _a2.workTimer;
+      if (!timer) return;
+      const result = A.finishWorkTimer({ elapsed: workElapsed(timer) });
+      if (!result) {
+        A.toast("That hold was already saved. Nothing was recorded twice.", 4e3);
+        return;
+      }
+      A.toast("Hold ended after " + result.seconds + " seconds" + (result.early ? " (early)" : "") + ". Edit the seconds if needed, then confirm.", 5e3);
+    },
+    "work-cancel": () => {
+      var _a2;
+      const s = A.s();
+      if (!((_a2 = s.session) == null ? void 0 : _a2.workTimer)) return;
+      A.cancelWorkTimer();
+      A.save();
+      A.render();
+      A.toast("Hold timer cancelled. No set was recorded.", 4e3);
     },
     "confirm-set": () => {
       confirmPending();
@@ -1312,8 +1616,8 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       A.render();
     },
     "timer-adjust": (d) => {
-      var _a;
-      const t = (_a = A.s().session) == null ? void 0 : _a.timer;
+      var _a2;
+      const t = (_a2 = A.s().session) == null ? void 0 : _a2.timer;
       if (!t) return;
       A.captureLog();
       const delta = Number(d.delta);
@@ -1330,8 +1634,8 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       A.render();
     },
     "undo": () => {
-      var _a;
-      if (!((_a = A.s().session) == null ? void 0 : _a.records.length)) return;
+      var _a2;
+      if (!((_a2 = A.s().session) == null ? void 0 : _a2.records.length)) return;
       A.cancelTimer();
       E.undoSet(A.s());
       A.save();
@@ -1339,8 +1643,8 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       A.toast("Last set undone. No history or progression penalty.");
     },
     "unavailable": (d) => {
-      var _a;
-      if ((_a = A.s().session) == null ? void 0 : _a.pendingLogId) {
+      var _a2;
+      if ((_a2 = A.s().session) == null ? void 0 : _a2.pendingLogId) {
         A.toast("Confirm the set you just finished first.");
         return;
       }
@@ -1356,8 +1660,8 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       if (result.needsWeight) A.openStarts([result.exercise.id], "substitute", result.entry.id);
     },
     "skip-exercise": (d) => {
-      var _a;
-      if ((_a = A.s().session) == null ? void 0 : _a.pendingLogId) {
+      var _a2;
+      if ((_a2 = A.s().session) == null ? void 0 : _a2.pendingLogId) {
         A.toast("Confirm your previous set first.");
         return;
       }
@@ -1385,8 +1689,8 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     },
     "discard-session": () => A.confirm("Discard this workout?", "Completed sets in this active session will be removed. Your saved history and accepted targets are not changed.", "discard-session-actual", "Discard workout"),
     "commit": () => {
-      var _a;
-      if ((_a = A.s().session) == null ? void 0 : _a.queue.length) {
+      var _a2;
+      if ((_a2 = A.s().session) == null ? void 0 : _a2.queue.length) {
         actions["end-early"]();
         return;
       }
@@ -1395,21 +1699,37 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     "target-edit": (d) => A.openTarget(d.id),
     "suggestion-edit": (d) => A.openTarget(d.id, true),
     "save-target": () => {
-      const data = A.ui.modal.data, e = E.ex(A.s(), data.id), weight = E.roundWeight(A.s(), e, n("target-weight", 0, 1e3)), reps = n("target-reps", e.min, e.max, true);
-      A.s().targets[e.id] = { weight, reps };
-      if (A.s().suggestions[e.id]) A.s().suggestions[e.id].accepted = true;
+      var _a2, _b, _c, _d;
+      const s = A.s(), e = E.ex(s, A.ui.modal.data.id);
+      const weight = (_b = (_a2 = $("target-weight")) == null ? void 0 : _a2.value.trim()) != null ? _b : "", reps = (_d = (_c = $("target-reps")) == null ? void 0 : _c.value.trim()) != null ? _d : "";
+      if (weight === "" || reps === "") throw new Error("Enter both a weight and a " + (e.type === "timed" ? "duration in seconds" : "rep target") + ".");
+      const result = E.setTarget(s, e, Number(weight), Number(reps));
+      if (result.error) throw new Error(result.error);
+      applyTargetToSession(e.id, result.target.weight, result.target.reps, true);
       A.save();
       A.refreshPlanned();
+      refreshActiveTimer();
       A.close();
       A.render();
-      A.toast("Next target saved: " + A.load(e, weight, reps));
+      A.screenAwake();
+      let message = "Manual target saved: " + A.load(e, result.target.weight, result.target.reps);
+      if (result.outsideRange) message += " · outside the normal " + e.min + "–" + e.max + " range, kept as entered.";
+      else if (!result.loadable) message += " · kept as entered; it is not one of your loadable weights.";
+      A.toast(message, 6500);
     },
     "accept-suggestion": (d) => {
-      E.accept(A.s(), d.id);
+      const s = A.s();
+      if (!E.accept(s, d.id)) {
+        A.toast("That suggestion is no longer available.", 4e3);
+        return;
+      }
+      const e = E.ex(s, d.id), t = E.target(s, e);
+      applyTargetToSession(d.id, t.weight, t.reps, t.manual === true);
       A.save();
       A.refreshPlanned();
+      refreshActiveTimer();
       A.render();
-      A.toast("Next target accepted.");
+      A.toast("Next target accepted: " + A.load(e, t.weight, t.reps), 5e3);
     },
     "chart-mode": (d) => {
       A.ui.chartMode = d.value;
@@ -1553,8 +1873,11 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       e.substitutes = [...data.substitutes];
       if (data.id) {
         A.s().exercises = A.s().exercises.map((x) => x.id === e.id ? e : x);
-        A.s().targets[e.id].reps = Math.min(e.max, Math.max(e.min, A.s().targets[e.id].reps));
-        if (A.s().targets[e.id].weight !== null) A.s().targets[e.id].weight = E.roundWeight(A.s(), e, A.s().targets[e.id].weight);
+        const t = A.s().targets[e.id];
+        if (t.manual !== true) {
+          t.reps = Math.min(e.max, Math.max(e.min, t.reps));
+          if (t.weight !== null) t.weight = E.roundWeight(A.s(), e, t.weight);
+        }
       } else {
         A.s().exercises.push(e);
         A.s().targets[e.id] = { weight: e.type === "bodyweight" || e.equipment === "bodyweight" ? 0 : null, reps: e.min };
@@ -1608,8 +1931,13 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       }
       if (!cfg.addedLoads.includes(0)) cfg.addedLoads.unshift(0);
       A.s().settings = cfg;
+      let kept = 0;
       for (const e of A.s().exercises) {
         const t = A.s().targets[e.id];
+        if (t.manual === true) {
+          kept++;
+          continue;
+        }
         if (t.weight !== null) t.weight = E.roundWeight(A.s(), e, t.weight);
       }
       recomputeSuggestions();
@@ -1617,7 +1945,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       A.refreshPlanned();
       A.close();
       A.render();
-      A.toast("Loadable weights updated.");
+      A.toast("Loadable weights updated." + (kept ? " " + kept + " manual target" + (kept === 1 ? "" : "s") + " kept exactly as saved." : ""), 5500);
     },
     "pairing": () => A.openPairing(),
     "reset-pairs": () => A.confirm("Reset pairing overrides?", "This clears your per-exercise overrides and restores the default symmetric group rules. Exercise group assignments stay as you edited them.", "reset-pairs-actual", "Reset", { id: A.ui.modal.data.id }),
@@ -1669,17 +1997,21 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       else $("backup-file").click();
     },
     "restore-confirm": () => {
-      var _a, _b;
+      var _a2, _b, _c;
       const imported = E.clone(A.ui.modal.data.imported);
       A.cancelTimer();
       A.Store.state = imported;
       A.ui.planned = null;
       A.ui.lastCommitted = null;
       A.ui.progressExercise = imported.exercises[0].id;
-      if (((_a = imported.session) == null ? void 0 : _a.timer) && imported.session.timer.deadline <= Date.now()) imported.session.timer = null;
+      if (((_a2 = imported.session) == null ? void 0 : _a2.timer) && imported.session.timer.deadline <= Date.now()) imported.session.timer = null;
+      if (imported.session) {
+        if (!imported.session.workTimer || imported.session.workTimer.deadline <= Date.now()) imported.session.workTimer = null;
+      }
       A.save();
       syncReminders();
       if ((_b = imported.session) == null ? void 0 : _b.timer) A.scheduleTimer();
+      if ((_c = imported.session) == null ? void 0 : _c.workTimer) A.scheduleWorkTimer();
       A.close();
       A.navigate(imported.session ? "session" : "today");
       A.toast("Workspace restored. All data stays on this device.");
@@ -1700,7 +2032,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     }
   });
   document.addEventListener("change", (event) => {
-    var _a;
+    var _a2;
     const el = event.target, s = A.s();
     try {
       if (el.id === "time-budget") {
@@ -1746,7 +2078,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
         A.save();
       }
       if (el.id === "edit-type" && el.value === "bodyweight") $("edit-equipment").value = "bodyweight";
-      if (el.id === "backup-file" && ((_a = el.files) == null ? void 0 : _a.length)) {
+      if (el.id === "backup-file" && ((_a2 = el.files) == null ? void 0 : _a2.length)) {
         const file = el.files[0];
         if (file.size > 64 * 1024 * 1024) throw new Error("Backup exceeds the 64 MB limit.");
         file.text().then(A.importData).catch((e) => A.toast(e.message));
@@ -1757,13 +2089,13 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     }
   });
   document.addEventListener("input", (event) => {
-    var _a, _b;
+    var _a2, _b;
     const el = event.target;
     if (el.id === "exercise-search") {
       const caret = el.selectionStart;
       A.ui.search = el.value;
       A.render();
-      (_a = $("exercise-search")) == null ? void 0 : _a.focus();
+      (_a2 = $("exercise-search")) == null ? void 0 : _a2.focus();
       (_b = $("exercise-search")) == null ? void 0 : _b.setSelectionRange(caret, caret);
     }
     if (["log-reps", "log-weight", "log-note", "log-failed"].includes(el.id)) {
@@ -1794,8 +2126,8 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     }
   });
   const expire = () => {
-    var _a;
-    if (!((_a = A.s().session) == null ? void 0 : _a.timer)) return;
+    var _a2;
+    if (!((_a2 = A.s().session) == null ? void 0 : _a2.timer)) return;
     A.captureLog();
     A.s().session.timer = null;
     A.save();
@@ -1803,9 +2135,32 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     A.render();
     A.toast(A.s().session.queue.length ? "Rest complete. Your next set is ready." : "Final rest complete. Confirm and COMMIT.", 2200);
   };
+  const expireWork = (complete) => {
+    var _a2;
+    const s = A.s(), timer = (_a2 = s.session) == null ? void 0 : _a2.workTimer;
+    if (!timer) return false;
+    const result = E.finishWork(s, complete ? { elapsed: timer.total, at: Date.now() } : { at: Date.now() });
+    if (!result) return false;
+    if (A.Store.native) root.Native.cancelTimer("work");
+    if (!A.Store.native) A.alert();
+    A.scheduleTimer();
+    A.save();
+    A.render();
+    A.toast((result.early ? "Hold ended after " : "Hold complete: ") + result.seconds + "s. Confirm the set, then rest.", 3800);
+    return true;
+  };
   setInterval(() => {
-    var _a;
-    const timer = (_a = A.s().session) == null ? void 0 : _a.timer;
+    const session = A.s().session;
+    if (!session) return;
+    const work = session.workTimer;
+    if (work) {
+      const remaining = Math.max(0, Math.ceil((work.deadline - Date.now()) / 1e3));
+      if ($("work-timer-text")) $("work-timer-text").textContent = A.time(remaining);
+      if ($("work-timer-ring")) $("work-timer-ring").setAttribute("stroke-dashoffset", String(320.44 * (1 - Math.min(1, remaining / Math.max(1, work.total)))));
+      if (work.deadline <= Date.now()) expireWork();
+      return;
+    }
+    const timer = session.timer;
     if (!timer) return;
     const left = Math.max(0, Math.ceil((timer.deadline - Date.now()) / 1e3));
     if ($("timer-text")) $("timer-text").textContent = A.time(left);
@@ -1814,13 +2169,21 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     if (timer.deadline <= Date.now()) expire();
   }, 250);
   A.syncNativeTimer = (text = null) => {
-    var _a;
+    var _a2, _b;
     if (!A.Store.native || !root.Native.timerState) return;
     try {
-      const status = JSON.parse(text || root.Native.timerState()), t = (_a = A.s().session) == null ? void 0 : _a.timer;
+      const status = JSON.parse(text || root.Native.timerState()), s = A.s();
+      const t = (_a2 = s.session) == null ? void 0 : _a2.timer;
       if (t && (Number(status.cancelled) === t.deadline || Number(status.delivered) === t.deadline)) {
         A.captureLog();
-        A.s().session.timer = null;
+        s.session.timer = null;
+        A.save();
+        A.render();
+      }
+      const w = (_b = s.session) == null ? void 0 : _b.workTimer;
+      if (w && Number(status.workDelivered) === w.deadline) expireWork(true);
+      else if (w && Number(status.workCancelled) === w.deadline) {
+        s.session.workTimer = null;
         A.save();
         A.render();
       }
@@ -1829,16 +2192,30 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   };
   root.onNativeTimerState = (text) => A.syncNativeTimer(text);
   root.onNativeTimerFinished = (deadline) => {
-    var _a;
-    const t = (_a = A.s().session) == null ? void 0 : _a.timer;
+    var _a2;
+    const t = (_a2 = A.s().session) == null ? void 0 : _a2.timer;
     if (t && Math.abs(t.deadline - Number(deadline)) < 500) expire();
   };
   root.onNativeTimerCancelled = (deadline) => {
-    var _a;
-    const t = (_a = A.s().session) == null ? void 0 : _a.timer;
+    var _a2;
+    const t = (_a2 = A.s().session) == null ? void 0 : _a2.timer;
     if (t && Math.abs(t.deadline - Number(deadline)) < 500) {
       A.captureLog();
       A.s().session.timer = null;
+      A.save();
+      A.render();
+    }
+  };
+  root.onNativeWorkFinished = (deadline) => {
+    var _a2;
+    const w = (_a2 = A.s().session) == null ? void 0 : _a2.workTimer;
+    if (w && Math.abs(w.deadline - Number(deadline)) < 500) expireWork(true);
+  };
+  root.onNativeWorkCancelled = (deadline) => {
+    var _a2;
+    const s = A.s(), w = (_a2 = s.session) == null ? void 0 : _a2.workTimer;
+    if (w && Math.abs(w.deadline - Number(deadline)) < 500) {
+      s.session.workTimer = null;
       A.save();
       A.render();
     }
@@ -1847,6 +2224,10 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   root.onNativeMessage = (text) => A.toast(text, 5e3);
   root.onNativePermissions = () => {
     if (A.ui.route === "settings" && !A.ui.modal) A.render();
+  };
+  root.onNativeResume = () => {
+    A.screenAwake();
+    A.syncNativeTimer();
   };
   root.onNativeBack = () => {
     if (A.ui.modal) {
@@ -1864,10 +2245,10 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     return false;
   };
   document.addEventListener("visibilitychange", () => {
-    var _a;
+    var _a2;
     if (document.visibilityState === "visible") {
       A.screenAwake();
-      if (((_a = A.s().session) == null ? void 0 : _a.timer) && A.s().session.timer.deadline <= Date.now()) expire();
+      if (((_a2 = A.s().session) == null ? void 0 : _a2.timer) && A.s().session.timer.deadline <= Date.now()) expire();
     } else {
       A.captureLog();
       A.save();
@@ -1882,7 +2263,13 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       if (A.s().session.timer.deadline <= Date.now()) A.s().session.timer = null;
       else A.scheduleTimer();
     }
-    A.toast("Workout resumed. Your last set is safe.", 4e3);
+    let workResumed = false;
+    const pendingWork = (_a = A.s().session) == null ? void 0 : _a.workTimer;
+    if (pendingWork) {
+      if (pendingWork.deadline <= Date.now()) workResumed = expireWork(pendingWork.deadline < Date.now() - 2e3);
+      else A.scheduleWorkTimer();
+    }
+    if (!workResumed) A.toast("Workout resumed. Your last set is safe.", 4e3);
     A.render();
   }
   if (!A.Store.error) A.save();

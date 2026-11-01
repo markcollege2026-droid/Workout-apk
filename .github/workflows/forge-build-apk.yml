@@ -182,10 +182,24 @@ jobs:
           "$BT/apksigner" verify --verbose --print-certs release/Forge-Workout.apk | tee release/apk-signature.txt
           "$BT/zipalign" -c 4 release/Forge-Workout.apk
           "$BT/aapt2" dump badging release/Forge-Workout.apk > release/apk-manifest.txt
+          "$BT/aapt2" dump xmltree --file AndroidManifest.xml release/Forge-Workout.apk > release/apk-manifest-tree.txt
           if grep -Fq "uses-permission: name='android.permission.INTERNET'" release/apk-manifest.txt; then
             echo "::error::Unexpected INTERNET permission. This app must stay offline."
             exit 1
           fi
+          # The shipped personal-release APK must not be debuggable (this also disables WebView debugging).
+          if grep -Fq "application-debuggable" release/apk-manifest.txt; then
+            echo "::error::The release APK is debuggable. Build with scripts/build-apk.sh without --debug."
+            exit 1
+          fi
+          if grep -Fq "android:debuggable" release/apk-manifest-tree.txt; then
+            echo "::error::android:debuggable is present in the release manifest."
+            exit 1
+          fi
+          grep -Fq "package: name='app.forge.workout'" release/apk-manifest.txt || { echo "::error::Unexpected package name."; exit 1; }
+          grep -Fq "sdkVersion:'26'" release/apk-manifest.txt || { echo "::error::minSdkVersion must stay 26."; exit 1; }
+          grep -Fq "targetSdkVersion:'35'" release/apk-manifest.txt || { echo "::error::targetSdkVersion must stay 35."; exit 1; }
+          grep -Fq "launchable-activity: name='app.forge.workout.MainActivity'" release/apk-manifest.txt || { echo "::error::Missing launcher activity."; exit 1; }
           python3 - <<'PY'
           from pathlib import Path
           import hashlib, os, zipfile
@@ -194,6 +208,15 @@ jobs:
               assert 'classes.dex' in archive.namelist(), 'Compiled Android code is missing'
               assert 'assets/www/forge.js' in archive.namelist(), 'Offline UI bundle is missing'
               assert archive.getinfo('res/raw/complete.wav').compress_type == 0, 'Timer sound must be stored uncompressed'
+              # The APK must carry the same bundle the repository ships.
+              packaged = hashlib.sha256(archive.read('assets/www/forge.js')).hexdigest()
+              source = hashlib.sha256(Path('www/forge.js').read_bytes()).hexdigest()
+              assert packaged == source, 'APK bundle differs from www/forge.js'
+              manifest_text = Path('release/apk-manifest.txt').read_text()
+              assert 'android.permission.INTERNET' not in manifest_text
+              dex = archive.read('classes.dex')
+              for symbol in (b'onNativeWorkFinished', b'previousState', b'restorePrevious', b'keepScreenAwake'):
+                  assert symbol in dex, 'Compiled code is missing native bridge: ' + symbol.decode()
           digest = hashlib.sha256(apk.read_bytes()).hexdigest()
           Path('release/SHA256SUMS.txt').write_text(digest + '  Forge-Workout.apk\n')
           Path('release/build-details.txt').write_text(
@@ -202,6 +225,7 @@ jobs:
               + 'Run: ' + os.environ['GITHUB_RUN_ID'] + '\n'
               + 'Source: ' + os.environ['GITHUB_SERVER_URL'] + '/' + os.environ['GITHUB_REPOSITORY'] + '\n'
               + 'Android minimum API: 26; compile/target API: 35; build tools: 35.0.0\n'
+              + 'Debuggable: no (personal release; WebView debugging disabled)\n'
               + 'Signing: personal-use debug key restored from Actions secret\n'
               + 'APK SHA-256: ' + digest + '\n'
           )
