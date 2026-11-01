@@ -193,32 +193,51 @@ jobs:
           from pathlib import Path
           badging = Path('release/apk-manifest.txt').read_text(errors='replace')
           tree = Path('release/apk-manifest-tree.txt').read_text(errors='replace')
-          print('--- aapt2 badging (first 20 lines) ---')
-          print('\n'.join(badging.splitlines()[:20]))
+          print('--- aapt2 badging (first 12 lines) ---')
+          print('\n'.join(badging.splitlines()[:12]))
           print('--- end badging ---')
           problems = []
 
-          def field(pattern, text=badging, flags=0):
-              match = re.search(pattern, text, flags)
+          def numeric(text):
+              """Turn the value part of an aapt2 line into a decimal string."""
+              tail = text.split('=')[-1].strip()
+              match = re.search(r"0x([0-9a-fA-F]+)\s*$", tail)
+              if match:
+                  return str(int(match.group(1), 16))
+              match = re.search(r"(\d+)\s*'?\s*$", tail)
               return match.group(1) if match else None
 
-          def hex_field(pattern, text):
-              value = field(pattern, text)
-              return str(int(value, 16)) if value else None
+          def badging_sdk(text, key):
+              for line in text.splitlines():
+                  if re.match(rf"\s*{key}:", line):
+                      return numeric(line)
+              return None
 
-          package = field(r"package: name='([^']+)'")
-          activity = field(r"launchable-activity: name='([^']+)'")
-          # minSdk/targetSdk appear as sdkVersion lines in badging and always in the manifest tree.
-          min_sdk = field(r"(?<![A-Za-z])sdkVersion:'?(\d+)'?") or hex_field(r"minSdkVersion\(0x0101020c\)=\(type 0x10\)0x([0-9a-fA-F]+)", tree)
-          target_sdk = field(r"targetSdkVersion:'?(\d+)'?") or hex_field(r"targetSdkVersion\(0x01010270\)=\(type 0x10\)0x([0-9a-fA-F]+)", tree)
+          def tree_sdk(text, key):
+              for line in text.splitlines():
+                  if key.lower() in line.lower():
+                      return numeric(line)
+              return None
+
+          def sdk_lines(text, key):
+              return [line.strip() for line in text.splitlines() if key.lower() in line.lower()][:3]
+
+          package = re.search(r"package: name='([^']+)'", badging)
+          package = package.group(1) if package else None
+          activity = re.search(r"launchable-activity: name='([^']+)'", badging)
+          activity = activity.group(1) if activity else None
+          # minSdk is an exact "sdkVersion:" line in badging (targetSdkVersion has its own prefix)
+          # and an attribute in the manifest tree; accept either source.
+          min_sdk = badging_sdk(badging, 'sdkVersion') or tree_sdk(tree, 'minSdkVersion')
+          target_sdk = badging_sdk(badging, 'targetSdkVersion') or tree_sdk(tree, 'targetSdkVersion')
           if 'application-debuggable' in badging or ':debuggable(' in tree:
               problems.append('the release APK is debuggable (build without the debug flag)')
           if package != 'app.forge.workout':
               problems.append(f'package name is {package!r}, expected app.forge.workout')
           if min_sdk != '26':
-              problems.append(f'minSdkVersion is {min_sdk!r}, expected 26')
+              problems.append(f'minSdkVersion is {min_sdk!r}, expected 26; badging={sdk_lines(badging, "sdkVersion")} tree={sdk_lines(tree, "minSdkVersion")}')
           if target_sdk != '35':
-              problems.append(f'targetSdkVersion is {target_sdk!r}, expected 35')
+              problems.append(f'targetSdkVersion is {target_sdk!r}, expected 35; badging={sdk_lines(badging, "targetSdkVersion")} tree={sdk_lines(tree, "targetSdkVersion")}')
           if activity != 'app.forge.workout.MainActivity':
               problems.append(f'launcher activity is {activity!r}')
           if 'android.permission.INTERNET' in badging or 'android.permission.INTERNET' in tree:
