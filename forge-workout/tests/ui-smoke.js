@@ -104,7 +104,7 @@ const path=require('node:path');
   expect(await featurePage.evaluate(()=>[ForgeApp.s().targets['hammer-curls'].weight,ForgeApp.s().targets['hammer-curls'].reps,ForgeApp.s().targets['hammer-curls'].manual])).toEqual([27.5,11,true]);
   await featurePage.reload();
   await featurePage.evaluate(()=>{ForgeApp.ui.progressExercise='hammer-curls';});
-  await featurePage.locator('[data-action="nav"][data-route="progress"]').first().click();
+  await featurePage.locator('[data-action="nav"][data-route="progress"]:visible').first().click();
   await expect(featurePage.locator('.next-target').filter({hasText:'Hammer Curls'})).toContainText('27.5');
   await expect(featurePage.locator('.next-target').filter({hasText:'Hammer Curls'})).toContainText('MANUAL');
   expect(await featurePage.evaluate(()=>ForgeEngine.target(ForgeApp.s(),ForgeEngine.ex(ForgeApp.s(),'hammer-curls')).reps)).toBe(11);
@@ -141,7 +141,7 @@ const path=require('node:path');
   expect(await featurePage.evaluate(()=>ForgeApp.s().session.records[0].reps)).toBe(Number(logged));
   check('A timed exercise counts down, can be cancelled, and an early hold logs its real seconds');
 
-  await featurePage.locator('[data-action="nav"][data-route="settings"]').first().click();
+  await featurePage.locator('[data-action="nav"][data-route="settings"]:visible').first().click();
   await featurePage.locator('[data-action="recover-previous"]').click();
   await expect(featurePage.locator('#modal-title')).toContainText('Restore the previous workspace');
   await expect(featurePage.locator('.modal-body')).toContainText('Saved');
