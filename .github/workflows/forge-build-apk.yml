@@ -193,16 +193,26 @@ jobs:
           from pathlib import Path
           badging = Path('release/apk-manifest.txt').read_text(errors='replace')
           tree = Path('release/apk-manifest-tree.txt').read_text(errors='replace')
+          print('--- aapt2 badging (first 20 lines) ---')
+          print('\n'.join(badging.splitlines()[:20]))
+          print('--- end badging ---')
           problems = []
+
+          def field(pattern, text=badging, flags=0):
+              match = re.search(pattern, text, flags)
+              return match.group(1) if match else None
+
+          def hex_field(pattern, text):
+              value = field(pattern, text)
+              return str(int(value, 16)) if value else None
+
+          package = field(r"package: name='([^']+)'")
+          activity = field(r"launchable-activity: name='([^']+)'")
+          # minSdk/targetSdk appear as sdkVersion lines in badging and always in the manifest tree.
+          min_sdk = field(r"(?<![A-Za-z])sdkVersion:'?(\d+)'?") or hex_field(r"minSdkVersion\(0x0101020c\)=\(type 0x10\)0x([0-9a-fA-F]+)", tree)
+          target_sdk = field(r"targetSdkVersion:'?(\d+)'?") or hex_field(r"targetSdkVersion\(0x01010270\)=\(type 0x10\)0x([0-9a-fA-F]+)", tree)
           if 'application-debuggable' in badging or ':debuggable(' in tree:
               problems.append('the release APK is debuggable (build without the debug flag)')
-          def field(pattern):
-              match = re.search(pattern, badging)
-              return match.group(1) if match else None
-          package = field(r"package: name='([^']+)'")
-          min_sdk = field(r"(?<![A-Za-z])sdkVersion:'?(\d+)'?")
-          target_sdk = field(r"targetSdkVersion:'?(\d+)'?")
-          activity = field(r"launchable-activity: name='([^']+)'")
           if package != 'app.forge.workout':
               problems.append(f'package name is {package!r}, expected app.forge.workout')
           if min_sdk != '26':
@@ -211,9 +221,9 @@ jobs:
               problems.append(f'targetSdkVersion is {target_sdk!r}, expected 35')
           if activity != 'app.forge.workout.MainActivity':
               problems.append(f'launcher activity is {activity!r}')
-          if 'android.permission.INTERNET' in badging:
+          if 'android.permission.INTERNET' in badging or 'android.permission.INTERNET' in tree:
               problems.append('the APK requests INTERNET')
-          print('Manifest check:', package, 'min', min_sdk, 'target', target_sdk, 'activity', activity)
+          print('Manifest check:', package, '| minSdk', min_sdk, '| targetSdk', target_sdk, '| activity', activity)
           if problems:
               for problem in problems:
                   print(f'::error::{problem}')
