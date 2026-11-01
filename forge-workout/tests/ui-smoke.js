@@ -122,9 +122,9 @@ const path=require('node:path');
   await featurePage.locator('[data-action="work-start"]').click();
   await expect(featurePage.locator('#work-timer-text')).toBeVisible();
   const firstRead=await featurePage.locator('#work-timer-text').textContent();
-  await featurePage.waitForTimeout(1100);
-  const secondRead=await featurePage.locator('#work-timer-text').textContent();
-  expect(firstRead).not.toBe(secondRead);
+  expect(firstRead).toBe('0:40');
+  // The readout is a whole-second ceil(), so poll instead of assuming the exact tick.
+  await expect.poll(()=>featurePage.locator('#work-timer-text').textContent(),{timeout:6000}).not.toBe(firstRead);
   await featurePage.locator('[data-action="work-cancel"]').click();
   expect(await featurePage.evaluate(()=>[ForgeApp.s().session.records.length,ForgeApp.s().session.workTimer])).toEqual([0,null]);
   await expect(featurePage.locator('[data-action="work-start"]')).toBeVisible();
