@@ -188,18 +188,37 @@ jobs:
             exit 1
           fi
           # The shipped personal-release APK must not be debuggable (this also disables WebView debugging).
-          if grep -Fq "application-debuggable" release/apk-manifest.txt; then
-            echo "::error::The release APK is debuggable. Build with scripts/build-apk.sh without --debug."
-            exit 1
-          fi
-          if grep -Fq "android:debuggable" release/apk-manifest-tree.txt; then
-            echo "::error::android:debuggable is present in the release manifest."
-            exit 1
-          fi
-          grep -Fq "package: name='app.forge.workout'" release/apk-manifest.txt || { echo "::error::Unexpected package name."; exit 1; }
-          grep -Fq "sdkVersion:'26'" release/apk-manifest.txt || { echo "::error::minSdkVersion must stay 26."; exit 1; }
-          grep -Fq "targetSdkVersion:'35'" release/apk-manifest.txt || { echo "::error::targetSdkVersion must stay 35."; exit 1; }
-          grep -Fq "launchable-activity: name='app.forge.workout.MainActivity'" release/apk-manifest.txt || { echo "::error::Missing launcher activity."; exit 1; }
+          python3 - <<'MANIFEST'
+          import re, sys
+          from pathlib import Path
+          badging = Path('release/apk-manifest.txt').read_text(errors='replace')
+          tree = Path('release/apk-manifest-tree.txt').read_text(errors='replace')
+          problems = []
+          if 'application-debuggable' in badging or ':debuggable(' in tree:
+              problems.append('the release APK is debuggable (build without the debug flag)')
+          def field(pattern):
+              match = re.search(pattern, badging)
+              return match.group(1) if match else None
+          package = field(r"package: name='([^']+)'")
+          min_sdk = field(r"(?<![A-Za-z])sdkVersion:'?(\d+)'?")
+          target_sdk = field(r"targetSdkVersion:'?(\d+)'?")
+          activity = field(r"launchable-activity: name='([^']+)'")
+          if package != 'app.forge.workout':
+              problems.append(f'package name is {package!r}, expected app.forge.workout')
+          if min_sdk != '26':
+              problems.append(f'minSdkVersion is {min_sdk!r}, expected 26')
+          if target_sdk != '35':
+              problems.append(f'targetSdkVersion is {target_sdk!r}, expected 35')
+          if activity != 'app.forge.workout.MainActivity':
+              problems.append(f'launcher activity is {activity!r}')
+          if 'android.permission.INTERNET' in badging:
+              problems.append('the APK requests INTERNET')
+          print('Manifest check:', package, 'min', min_sdk, 'target', target_sdk, 'activity', activity)
+          if problems:
+              for problem in problems:
+                  print(f'::error::{problem}')
+              sys.exit(1)
+          MANIFEST
           python3 - <<'PY'
           from pathlib import Path
           import hashlib, os, zipfile
