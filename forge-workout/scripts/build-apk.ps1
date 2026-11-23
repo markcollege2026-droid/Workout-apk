@@ -1,4 +1,7 @@
 # Windows PowerShell SDK-only build. Requires JDK 17+ and Android SDK packages 35.
+# Usage: .\scripts\build-apk.ps1            -> personal release (not debuggable)
+#        .\scripts\build-apk.ps1 -Debug     -> development build (debuggable + WebView debugging)
+param([switch]$Debug)
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
 $Sdk = $env:ANDROID_SDK_ROOT
@@ -14,7 +17,17 @@ foreach ($Dir in @("$Work\gen","$Work\classes","$Work\dex","$Work\assets\www","$
 Copy-Item "$Root\www\*" "$Work\assets\www" -Recurse
 & "$Bt\aapt2.exe" compile --dir "$Root\android\app\src\main\res" -o "$Work\resources.zip"
 if ($LASTEXITCODE) { throw 'Resource compilation failed.' }
-& "$Bt\aapt2.exe" link -o "$Work\linked.apk" -I $Platform --manifest "$Root\android\app\src\main\AndroidManifest.xml" --java "$Work\gen" -A "$Work\assets" --min-sdk-version 26 --target-sdk-version 35 --version-code 1 --version-name 1.0 "$Work\resources.zip"
+$Manifest = "$Root\android\app\src\main\AndroidManifest.xml"
+if ($Debug) {
+  # Build-only copy: the checked-in manifest is never debuggable.
+  $Manifest = "$Work\AndroidManifest.debug.xml"
+  $Xml = [System.IO.File]::ReadAllText("$Root\android\app\src\main\AndroidManifest.xml")
+  if ($Xml -match 'android:debuggable=') { throw 'The source manifest must not set android:debuggable.' }
+  $Xml = $Xml.Replace('<application ', '<application android:debuggable="true" ')
+  [System.IO.File]::WriteAllText($Manifest, $Xml)
+  Write-Host 'Development build: android:debuggable="true".'
+} else { Write-Host 'Personal-release build: non-debuggable.' }
+& "$Bt\aapt2.exe" link -o "$Work\linked.apk" -I $Platform --manifest $Manifest --java "$Work\gen" -A "$Work\assets" --min-sdk-version 26 --target-sdk-version 35 --version-code 1 --version-name 1.0 "$Work\resources.zip"
 if ($LASTEXITCODE) { throw 'APK linking failed.' }
 $Sources = Get-ChildItem "$Root\android\app\src\main\java","$Work\gen" -Filter *.java -Recurse | ForEach-Object { '"' + $_.FullName + '"' }
 [System.IO.File]::WriteAllLines("$Work\sources.txt",$Sources,[System.Text.UTF8Encoding]::new($false))

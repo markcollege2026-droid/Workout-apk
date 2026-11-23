@@ -78,7 +78,9 @@ public class MainActivity extends Activity {
             }
         });
         web.addJavascriptInterface(new Bridge(), "Native");
-        WebView.setWebContentsDebuggingEnabled((getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE)!=0);
+        // WebView debugging exists only in a debuggable (development) build.
+        boolean debuggable=(getApplicationInfo().flags & android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE)!=0;
+        WebView.setWebContentsDebuggingEnabled(debuggable);
         container.addView(web,new LinearLayout.LayoutParams(-1,-1));
         setContentView(container);
         web.loadUrl("file:///android_asset/www/index.html");
@@ -89,7 +91,11 @@ public class MainActivity extends Activity {
     }
     @Override protected void onResume() {
         super.onResume();
-        if(web!=null) {web.onResume();web.post(()->{web.evaluateJavascript("window.onNativePermissions&&window.onNativePermissions();",null);callback("onNativeTimerState",new Bridge().timerState());});}
+        if(web!=null) {web.onResume();web.post(()->{
+            web.evaluateJavascript("window.onNativePermissions&&window.onNativePermissions();",null);
+            callback("onNativeTimerState",new Bridge().timerState());
+            callback("onNativeResume","");
+        });}
     }
     @Override protected void onPause() {super.onPause();if(web!=null)web.onPause();}
     @Override protected void onDestroy() {
@@ -119,11 +125,32 @@ public class MainActivity extends Activity {
         synchronized void save(String json){
             SQLiteDatabase sql=getWritableDatabase();sql.beginTransaction();
             try{
-                // One last known state stays available to an advanced local recovery, never uploaded.
+                // One last known state stays available to local recovery, never uploaded.
                 sql.execSQL("INSERT OR REPLACE INTO workspace(id,state,modified) SELECT 2,state,modified FROM workspace WHERE id=1");
                 ContentValues v=new ContentValues();v.put("id",1);v.put("state",json);v.put("modified",System.currentTimeMillis());
                 sql.insertWithOnConflict("workspace",null,v,SQLiteDatabase.CONFLICT_REPLACE);sql.setTransactionSuccessful();
             }finally{sql.endTransaction();}
+        }
+        /** Row 2: the workspace as it was before the most recent save. */
+        synchronized String[] previous(){
+            try(Cursor c=getReadableDatabase().rawQuery("SELECT state,modified FROM workspace WHERE id=2",null)){
+                if(!c.moveToFirst())return null;
+                return new String[]{c.getString(0),Long.toString(c.getLong(1))};
+            }
+        }
+        /**
+         * Restores row 2 into row 1 in one transaction. The workspace being replaced is first
+         * copied into row 2, so the user can always come back to it.
+         */
+        synchronized boolean restorePrevious(String json){
+            SQLiteDatabase sql=getWritableDatabase();sql.beginTransaction();
+            try{
+                sql.execSQL("INSERT OR REPLACE INTO workspace(id,state,modified) SELECT 2,state,modified FROM workspace WHERE id=1");
+                ContentValues v=new ContentValues();v.put("id",1);v.put("state",json);v.put("modified",System.currentTimeMillis());
+                sql.insertWithOnConflict("workspace",null,v,SQLiteDatabase.CONFLICT_REPLACE);
+                sql.setTransactionSuccessful();return true;
+            }catch(Exception e){Log.e("Forge","Restore previous workspace",e);return false;}
+            finally{sql.endTransaction();}
         }
     }
     public final class Bridge {
@@ -132,21 +159,50 @@ public class MainActivity extends Activity {
             try {JSONObject check=new JSONObject(json);if(check.optInt("version")!=1)return "Unsupported state";db.save(json);return "ok";}
             catch(Exception e){Log.e("Forge","SQLite save",e);return "SQLite error: "+e.getMessage();}
         }
+        private boolean screenAwake;
+        /** The WebView reports the desired state on every save; only changes touch the window. */
         @JavascriptInterface public void keepScreenAwake(boolean awake){runOnUiThread(()->{
+            if(screenAwake==awake)return;
+            screenAwake=awake;
             if(awake)getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
             else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         });}
-        @JavascriptInterface public void startTimer(long deadline,String kind,String next,boolean sound,boolean vibrate){
+        /** type "rest" (default) or "work": the two countdowns keep separate native state. */
+        @JavascriptInterface public void startTimer(long deadline,String kind,String next,boolean sound,boolean vibrate,String type){
+            final String channel=RestTimerService.normalise(type);
             runOnUiThread(()->{
                 Intent i=new Intent(MainActivity.this,RestTimerService.class).setAction(RestTimerService.START);
-                i.putExtra("deadline",deadline).putExtra("kind",kind).putExtra("next",next).putExtra("sound",sound).putExtra("vibrate",vibrate);
+                i.putExtra("deadline",deadline).putExtra("kind",kind).putExtra("next",next).putExtra("sound",sound).putExtra("vibrate",vibrate).putExtra("type",channel);
                 try {startForegroundService(i);}catch(Exception e){Log.e("Forge","Timer service",e);message("Could not start the background timer: "+e.getMessage());}
             });
         }
         @JavascriptInterface public String timerState(){
-            try {android.content.SharedPreferences p=RestTimerService.prefs(MainActivity.this);JSONObject j=new JSONObject();j.put("deadline",p.getLong("timer_deadline",0));j.put("delivered",p.getLong("timer_delivered",0));j.put("cancelled",p.getLong("timer_cancelled",0));return j.toString();}catch(Exception e){return "{}";}
+            try {
+                android.content.SharedPreferences p=RestTimerService.prefs(MainActivity.this);JSONObject j=new JSONObject();
+                j.put("deadline",p.getLong("timer_deadline",0));j.put("delivered",p.getLong("timer_delivered",0));j.put("cancelled",p.getLong("timer_cancelled",0));
+                j.put("workDeadline",p.getLong("work_deadline",0));j.put("workDelivered",p.getLong("work_delivered",0));j.put("workCancelled",p.getLong("work_cancelled",0));
+                j.put("activeType",RestTimerService.normalise(p.getString("timer_type",RestTimerService.TYPE_REST)));
+                return j.toString();
+            }catch(Exception e){return "{}";}
         }
-        @JavascriptInterface public void cancelTimer(){runOnUiThread(()->RestTimerService.cancel(MainActivity.this,false));}
+        @JavascriptInterface public void cancelTimer(String type){final String channel=RestTimerService.normalise(type);runOnUiThread(()->RestTimerService.cancel(MainActivity.this,false,channel));}
+        /** Inspect the previous workspace (SQLite row 2) without changing anything. */
+        @JavascriptInterface public String previousState(){
+            try{
+                String[] row=db.previous();JSONObject j=new JSONObject();
+                if(row==null){j.put("available",false);return j.toString();}
+                j.put("available",true);j.put("modified",Long.parseLong(row[1]));j.put("state",row[0]);return j.toString();
+            }catch(Exception e){Log.e("Forge","Previous workspace",e);try{return new JSONObject().put("available",false).put("error",String.valueOf(e.getMessage())).toString();}catch(Exception ignored){return "{\"available\":false}";}}
+        }
+        /** Restore it in one transaction, after the WebView validated the JSON. */
+        @JavascriptInterface public String restorePrevious(String json){
+            try{
+                JSONObject check=new JSONObject(json);
+                if(check.optInt("version")!=1)return "Unsupported state";
+                if(!db.restorePrevious(json))return "The previous workspace could not be restored.";
+                return "ok";
+            }catch(Exception e){Log.e("Forge","Restore previous",e);return "Restore failed: "+e.getMessage();}
+        }
         @JavascriptInterface public void testAlert(boolean sound,boolean vibrate){runOnUiThread(()->TimerSignals.cue(MainActivity.this,sound,vibrate));}
         @JavascriptInterface public String permissions(){
             try {

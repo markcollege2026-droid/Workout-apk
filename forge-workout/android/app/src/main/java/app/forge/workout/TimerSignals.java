@@ -23,27 +23,32 @@ final class TimerSignals {
     static final String TIMER_CHANNEL="forge-rest-status",COMPLETE_CHANNEL="forge-rest-complete",REMINDER_CHANNEL="forge-training";
     static void channels(Context c){
         NotificationManager n=(NotificationManager)c.getSystemService(Context.NOTIFICATION_SERVICE);
-        NotificationChannel status=new NotificationChannel(TIMER_CHANNEL,"Active rest timer",NotificationManager.IMPORTANCE_LOW);
-        status.setDescription("Live countdown while you rest");status.setSound(null,null);status.enableVibration(false);
-        NotificationChannel complete=new NotificationChannel(COMPLETE_CHANNEL,"Rest complete",NotificationManager.IMPORTANCE_DEFAULT);
+        NotificationChannel status=new NotificationChannel(TIMER_CHANNEL,"Active timers",NotificationManager.IMPORTANCE_LOW);
+        status.setDescription("Live countdown for rest and timed exercises");status.setSound(null,null);status.enableVibration(false);
+        NotificationChannel complete=new NotificationChannel(COMPLETE_CHANNEL,"Timer complete",NotificationManager.IMPORTANCE_DEFAULT);
         complete.setDescription("Timer-finished message; the app separately controls sound and vibration");complete.setSound(null,null);complete.enableVibration(false);
         NotificationChannel reminder=new NotificationChannel(REMINDER_CHANNEL,"Training reminders",NotificationManager.IMPORTANCE_DEFAULT);
         reminder.setDescription("Only the training days you choose");
         n.createNotificationChannel(status);n.createNotificationChannel(complete);n.createNotificationChannel(reminder);
     }
     static boolean canNotify(Context c){return Build.VERSION.SDK_INT<33||c.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)==PackageManager.PERMISSION_GRANTED;}
-    static synchronized void finish(Context c,long deadline){
+    static synchronized void finish(Context c,long deadline,String type){
+        String t=RestTimerService.normalise(type),key=RestTimerService.prefix(t);
         SharedPreferences p=RestTimerService.prefs(c);
-        if(deadline<=0||p.getLong("timer_deadline",0)!=deadline||p.getLong("timer_delivered",0)==deadline)return;
-        String next=p.getString("timer_next","Your next set is ready");boolean sound=p.getBoolean("timer_sound",true),vibrate=p.getBoolean("timer_vibrate",true);
-        p.edit().putLong("timer_delivered",deadline).commit();
-        RestTimerService.cancel(c,false);channels(c);cue(c,sound,vibrate);
+        if(deadline<=0||p.getLong(key+"deadline",0)!=deadline||p.getLong(key+"delivered",0)==deadline)return;
+        boolean work=RestTimerService.TYPE_WORK.equals(t);
+        String next=p.getString(key+"next",work?"Your timed set":"Your next set is ready");
+        boolean sound=p.getBoolean(key+"sound",true),vibrate=p.getBoolean(key+"vibrate",true);
+        p.edit().putLong(key+"delivered",deadline).commit();
+        RestTimerService.cancel(c,false,t);channels(c);cue(c,sound,vibrate);
         if(canNotify(c)){
             PendingIntent tap=PendingIntent.getActivity(c,0,new Intent(c,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),PendingIntent.FLAG_UPDATE_CURRENT|PendingIntent.FLAG_IMMUTABLE);
-            Notification done=new Notification.Builder(c,COMPLETE_CHANNEL).setSmallIcon(R.drawable.ic_notification).setContentTitle("Rest complete. Next set ready.").setContentText(next).setContentIntent(tap).setAutoCancel(true).setCategory(Notification.CATEGORY_ALARM).build();
-            ((NotificationManager)c.getSystemService(Context.NOTIFICATION_SERVICE)).notify(201,done);
+            Notification done=new Notification.Builder(c,COMPLETE_CHANNEL).setSmallIcon(R.drawable.ic_notification)
+                .setContentTitle(work?"Hold complete. Log your set.":"Rest complete. Next set ready.")
+                .setContentText(next).setContentIntent(tap).setAutoCancel(true).setCategory(Notification.CATEGORY_ALARM).build();
+            ((NotificationManager)c.getSystemService(Context.NOTIFICATION_SERVICE)).notify(work?202:201,done);
         }
-        MainActivity.callback("onNativeTimerFinished",Long.toString(deadline));
+        MainActivity.callback(work?"onNativeWorkFinished":"onNativeTimerFinished",Long.toString(deadline));
     }
     static void cue(Context c,boolean sound,boolean vibrate){
         if(vibrate){

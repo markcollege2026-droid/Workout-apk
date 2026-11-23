@@ -17,3 +17,6 @@ ci-unpacked/
 signing/*.keystore
 signing/*.jks
 signing/*.p12
+
+# Local scratch runs
+.local/

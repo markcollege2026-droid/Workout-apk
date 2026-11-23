@@ -41,6 +41,7 @@ Android **Force stop** disables alarms/services/reminders. It is not a normal ba
 - Tap **Plan my workout**. Enter comfortable starting loads or select **Unknown · suggest conservative starts** and review them.
 - Check the plan and estimated time. Heavy compounds come first; compatible exercises are paired using your table. Triples are optional and off initially.
 - Tap **Set done** at the instant you finish. The timer starts before the log. The log is target-prefilled; confirm while resting. In a superset, A starts a transition and B starts the full rest.
+- A **timed exercise** (Plank, Farmer Carries) shows its target duration and replaces **Set done** with **Start timer**. The app counts down, alerts you at zero with your sound/vibration settings, and opens the log prefilled with the seconds you actually held. **Finish early** logs the real duration (marked *ended early*); **Cancel timer** records no set. The rest timer then runs exactly as usual.
 - Use **Unavailable today** for the next unused substitute or **Skip today**. Substitute targets and history are independent. Original, skipped, and incomplete exercises are not penalized.
 - Use **COMMIT** to finish and save. In Progress, review **Raise? / To?**, then **Accept** or edit each proposal. Nothing silently raises your load.
 
@@ -50,13 +51,15 @@ Every set and draft log autosaves. Reopening goes straight into the same active 
 
 - **29 original exercises**, all specified rep/time ranges, **4 Pull Up sets** and **3 sets** elsewhere, plus **11 distinct substitute exercises** with the specified ordered defaults.
 - Symmetric, editable pair rules, greedy equal-set-count preference, heavy-lift ordering, unequal-round handling, and optional mutually compatible triples.
-- Global/per-exercise rest, 10-second transitions, sound/vibration toggles, and screen-awake preference.
+- Global/per-exercise rest, 10-second transitions, a dedicated **timed-exercise work countdown**, sound/vibration toggles, and a screen-awake preference wired to the native window flag.
 - Warm-up ramps for the five main compounds, loadable plate combinations and load lists, priorities and time-budget trimming, and machine/setup notes.
 - Weighted/bodyweight/timed logging, attempted/failed sets, optional RIR, per-set and session notes, explicit progression acceptance/override, safe jumps, double increments, and deload suggestions.
+- **Manual target overrides**: any weight or rep/second target you enter is saved exactly as typed — never rounded to your equipment and never clamped to the exercise range — and is marked `MANUAL` wherever it appears. Only automatic targets follow loadability, safe-jump caps and range limits.
 - Real weight/Epley/volume charts, PRs, stalled lifts, weekly primary-muscle working-set totals, accepted next targets, and bodyweight snapshots for total-load tracking.
 - Session history, editable past sets/RIR/notes/date/duration, calendar, streak, estimated versus actual duration, and planned superset savings.
 - Add/edit/reorder/archive exercises, free-form equipment tags, editable substitute ordering, configurable equipment, and chosen-day reminders.
 - Complete one-file **JSON export/import**, including settings and an active session; validation happens before any replacement.
+- **Previous-workspace recovery** in Settings: inspect the last saved revision (timestamp, counts, manual overrides) and restore it in one transaction, with your current workspace kept as the new recovery copy. Invalid revisions are refused without touching current data.
 
 ## 4. Build the APK yourself
 
@@ -177,7 +180,7 @@ bash scripts/build-apk.sh
 - `www/storage.js`: private SQLite bridge on Android; localStorage in the preview.
 - `android/app/src/main/java/app/forge/workout/`: activity, transactional SQLite workspace repository, foreground timer, deduplicated alarm completion, and local reminders.
 - `scripts/`: SDK-only builds and optional JS transpilation.
-- `tests/`: 45 passing engine tests, 27 passing browser/UI/bridge-contract checks, and scope/verification report.
+- `tests/`: **101 passing Node tests** (engine, manual-override, work-timer and app-layer suites) and **31 passing browser/UI/bridge-contract checks**, plus the scope/verification report.
 
 SQLite stores the complete versioned workspace document transactionally, plus one previous local revision. History is keyed by actual exercise IDs, not by substituted-original IDs. Android's automatic cloud backup/device transfer is excluded; backups happen only when you choose to export.
 
@@ -185,9 +188,10 @@ SQLite stores the complete versioned workspace document transactionally, plus on
 
 - Linux SDK 35 build completed; aapt2/d8 compilation succeeded.
 - APK alignment and v2/v3 signature verification passed.
-- APK manifest was inspected: **no Internet permission**.
-- **45 engine tests passed**, including all 63 nonempty block selections, pairing exceptions, unequal sets, triples, budget trimming, loadability, immediate timers, progression, failure/deload rules, substitution independence, undo after substitute/skip, warm-up-only session semantics, analytics and backup validation.
-- **27 UI checks passed**: complete session workflow, drafts and reload, notes, edit/archive, independent substitutes, history editing (including future-date rejection and accepted-suggestion preservation), real charts, export/restore, malformed-backup rejection, corrupt-storage recovery, 320px layouts, local-file assets, and mocked native bridge contracts. No JavaScript page errors.
+- APK manifest was inspected: **no Internet permission**, package `app.forge.workout`, minSdk 26, targetSdk 35, and **not debuggable** (release builds only; `scripts/build-apk.sh --debug` is the development build and is never shipped).
+- **101 Node tests passed**: 45 original engine tests plus 17 manual-override, 18 work-timer and 21 app-layer regressions (the app suite runs the real bundle in a jsdom window, including the native bridge contract).
+- **31 browser UI checks passed**: complete session workflow, drafts and reload, notes, edit/archive, independent substitutes, history editing (including future-date rejection and accepted-suggestion preservation), real charts, export/restore, malformed-backup rejection, corrupt-storage recovery, 320px layouts, local-file assets, mocked native bridge contracts, unrounded manual targets across reloads, the timed-exercise hold countdown (cancel + early finish), and previous-workspace recovery.
+- **1 November 2026 pass** fixed manual target overrides being rounded/clamped/reverted, added a real timed-exercise work countdown on its own native timer channel, wired the keep-screen-awake setting to the native bridge, completed previous-workspace recovery, and made the personal-release APK non-debuggable. See the addendum in `tests/VERIFICATION.md`.
 - **25 October 2026 functional-QA pass** fixed three defects with new regression tests: accepted suggestions were silently un-accepted by history edits, undo could resurrect tasks of skipped/substituted entries, and history editing accepted future session dates. GitHub Actions now also runs the headless UI smoke suite and fails on `www/forge.js` bundle drift. See the addendum in `tests/VERIFICATION.md`.
 - An Android emulator could not boot in the 2 GB, unaccelerated workspace. **No Android runtime, physical-device alert, Doze/reboot, OEM battery-policy, or Windows-build execution is claimed.** Perform the screen-off check above on your actual phone.
 

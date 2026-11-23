@@ -59,3 +59,54 @@ Also in this pass:
 - Removed the dead `ForgeStore.sync()` bridge helper; `tests/ui-results.json` is now git-ignored.
 
 Local results, 25 October 2026: **45/45 engine tests**, **51/51 end-to-end preview checks**, 0 page/console errors, checked-in bundle verified byte-identical to the readable sources. The Android runtime (SQLite bridge, screen-off alerts, alarms, reminders) remains unverifiable without a device/emulator; the phone checklist in README still applies.
+
+---
+
+# Update — 1 November 2026 (target overrides, work timer, recovery, release hardening)
+
+## Root cause of the reverted manual target
+
+`engine.target()` applied `roundWeight()` to every stored target on every read and then clamped
+reps to the exercise's `min`/`max`. `app.js` also rounded at the moment of saving
+(`save-target`, `save-starts`), `save-equipment` re-rounded every stored weight, and
+`save-exercise` re-clamped every stored rep target. So an intentional target such as
+**27.5 kg × 11** was rewritten to the nearest dumbbell (28) and clamped to 10 the first time it
+was read; there was nowhere to record that the value was explicit.
+
+## What changed
+
+| Area | Change |
+|---|---|
+| Target storage | `targets[id]` now carries `manual:true` (plus `overriddenAt`). Older backups without the flag keep working and are treated as automatic. |
+| Engine | `target()` returns a manual override exactly (only absolute limits 0–1000 kg / 1–3600 reps are applied) and reports `manual`/`loadable`. `setTarget()` validates, stores, clears the superseded proposal, and reports `outsideRange`. `accept()` stores `manual:false`. Plan/session entries and queue tasks carry`manualTarget`, and a manual target below the range is judged against the chosen target instead of the exercise minimum, so it is not logged as a failed set or counted as a missed minimum. |
+| App | `save-target`/`save-starts` save exactly what was typed and report the real saved values; `save-equipment` and `save-exercise` skip manual targets; a target edited mid-workout also updates the remaining queue; Progress/Library/Plan show a `MANUAL` badge. |
+| Work timer | New `startWork`/`finishWork`/`cancelWork` engine state (`session.workTimer`) separate from `session.timer`. Timed sets cannot be logged by `completeSet` without the countdown. The UI replaces **Set done** with **Start N-second timer**, shows a live countdown, **Finish early** (logs the real seconds, marked early) and **Cancel timer** (records nothing); the existing rest timer starts at the end of the hold. |
+| Native timer | `RestTimerService` now handles two channels (`rest`, `work`) with separate persisted keys, alarm request codes and notification actions; `TimerSignals.finish` takes the channel, deduplicates per channel and calls back `onNativeWorkFinished`/`onNativeWorkCancelled`. No second foreground service was added. |
+| Screen awake | `A.screenAwake()` now calls `Native.keepScreenAwake(desired)` in the APK (previously it returned immediately), and the flag follows session start, commit, discard, setting changes and activity resume. The browser preview keeps its Wake Lock API path. |
+| Recovery | SQLite row 2 is now reachable: `Native.previousState()`/`Native.restorePrevious(json)`, an engine-validated Settings dialog with timestamp and counts, a transactional restore that first copies the current workspace into row 2. The browser preview keeps an equivalent localStorage copy so both backends behave the same. |
+| Release build | The source manifest no longer sets `android:debuggable`. `scripts/build-apk.sh --debug` (and `-Debug` in PowerShell) injects it into a build-only manifest; WebView debugging follows the debuggable flag. CI now fails if the APK is debuggable or if its packaged bundle differs from `www/forge.js`. |
+
+## Tested in this environment
+
+- **101 Node tests** (`npm test`): 45 pre-existing engine tests unchanged and passing; 17 new
+  manual-override tests; 18 new work-timer tests; 21 new app-layer tests that boot the real
+  `forge.js` bundle in jsdom, including the native bridge contract, screen-awake calls, the
+  timed-exercise UI flow and both recovery paths (valid and corrupt).
+- Java sources parse cleanly (javalang). There is **no JDK or Android SDK in this workspace**, so
+  native compilation, dexing and APK assembly were performed by GitHub Actions instead of
+  locally; see the Actions run for this branch.
+- `npm run bundle` regenerates `www/forge.js` byte-identically to the committed bundle.
+- Playwright could not run locally (the browser download is blocked in this sandbox); the
+  31-check browser suite runs in GitHub Actions on every push.
+
+## Not verified (no physical device available)
+
+- Screen-off and background behaviour of the **work** countdown, including OEM battery policies.
+- Audible/vibration delivery of the hold-complete cue at zero.
+- Real-device SQLite recovery across an app kill, and the Storage Access Framework paths.
+- Anything involving Android's Doze, reboot or Force stop semantics.
+
+These are the same limitations recorded for the rest timer: the implementation uses a
+user-started foreground service with a monotonic in-process countdown, a persisted wall-clock
+deadline, a duration-bounded partial wake lock, an exact alarm when the OS allows it, and
+per-channel deduplication, but no app can guarantee delivery against every manufacturer policy.

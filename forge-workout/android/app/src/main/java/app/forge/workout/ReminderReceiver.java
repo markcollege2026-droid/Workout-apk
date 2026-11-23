@@ -38,9 +38,13 @@ public class ReminderReceiver extends BroadcastReceiver {
         }
         schedule(c);
         if(!REMIND.equals(intent.getAction())){
-            long deadline=RestTimerService.prefs(c).getLong("timer_deadline",0);
-            if(deadline>System.currentTimeMillis())RestTimerService.scheduleAlarm(c,deadline);
-            else if(deadline>0)RestTimerService.prefs(c).edit().putLong("timer_deadline",0).apply();
+            // Re-arm both countdown kinds after a boot, time or timezone change.
+            for(String type:new String[]{RestTimerService.TYPE_REST,RestTimerService.TYPE_WORK}){
+                String key=RestTimerService.prefix(type);
+                long deadline=RestTimerService.prefs(c).getLong(key+"deadline",0);
+                if(deadline>System.currentTimeMillis())RestTimerService.scheduleAlarm(c,deadline,type);
+                else if(deadline>0)RestTimerService.prefs(c).edit().putLong(key+"deadline",0).apply();
+            }
         }
     }
 }

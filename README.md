@@ -33,8 +33,8 @@ python3 -m http.server 3000 --bind 0.0.0.0 --directory www
 cd forge-workout
 npm ci
 npm run bundle   # REQUIRED after editing readable www/*.js — CI fails on bundle drift
-npm test         # 45 engine unit tests (node:test)
-npm run test:ui  # 27 headless-browser checks (Playwright; needs the preview server
+npm test         # 101 Node tests (engine, overrides, work timer, app layer)
+npm run test:ui  # 31 headless-browser checks (Playwright; needs the preview server
                  # and a one-time `npx playwright install --with-deps chromium`)
 ```
 

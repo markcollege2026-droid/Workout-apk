@@ -15,12 +15,38 @@ KEYTOOL="${JAVA_HOME:+$JAVA_HOME/bin/}keytool"
 BT="$SDK/build-tools/35.0.0"
 PLATFORM="$SDK/platforms/android-35/android.jar"
 [[ -f "$PLATFORM" && -x "$BT/aapt2" ]] || { echo 'Install SDK packages: sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools"' >&2; exit 1; }
+DEBUG_BUILD=0
+for arg in "$@"; do
+  case "$arg" in
+    --debug) DEBUG_BUILD=1 ;;
+    --release) DEBUG_BUILD=0 ;;
+    *) echo "Unknown option: $arg (use --debug or --release)" >&2; exit 1 ;;
+  esac
+done
 WORK="$ROOT/build/apk"
 rm -rf "$WORK"
 mkdir -p "$WORK"/{gen,classes,dex,assets/www} "$ROOT/release" "$ROOT/signing"
 cp -R "$ROOT/www/." "$WORK/assets/www/"
+# The personal-release manifest is never debuggable. A development build gets a
+# build-only copy with android:debuggable="true"; the source manifest is not modified.
+MANIFEST="$ROOT/android/app/src/main/AndroidManifest.xml"
+if [[ "$DEBUG_BUILD" == "1" ]]; then
+  MANIFEST="$WORK/AndroidManifest.debug.xml"
+  python3 - "$ROOT/android/app/src/main/AndroidManifest.xml" "$MANIFEST" <<'INJECT'
+import sys
+source, target = sys.argv[1], sys.argv[2]
+xml = open(source, encoding='utf-8').read()
+if 'android:debuggable=' in xml:
+    raise SystemExit('The source manifest must not set android:debuggable.')
+xml = xml.replace('<application ', '<application android:debuggable="true" ', 1)
+open(target, 'w', encoding='utf-8').write(xml)
+INJECT
+  echo 'Development build: android:debuggable="true" (WebView debugging enabled).'
+else
+  echo 'Personal-release build: non-debuggable, WebView debugging disabled.'
+fi
 "$BT/aapt2" compile --dir "$ROOT/android/app/src/main/res" -o "$WORK/resources.zip"
-"$BT/aapt2" link -o "$WORK/linked.apk" -I "$PLATFORM" --manifest "$ROOT/android/app/src/main/AndroidManifest.xml" --java "$WORK/gen" -A "$WORK/assets" --min-sdk-version 26 --target-sdk-version 35 --version-code 1 --version-name 1.0 "$WORK/resources.zip"
+"$BT/aapt2" link -o "$WORK/linked.apk" -I "$PLATFORM" --manifest "$MANIFEST" --java "$WORK/gen" -A "$WORK/assets" --min-sdk-version 26 --target-sdk-version 35 --version-code 1 --version-name 1.0 "$WORK/resources.zip"
 find "$ROOT/android/app/src/main/java" "$WORK/gen" -name '*.java' -print0 | while IFS= read -r -d '' source; do printf '"%s"\n' "$source"; done > "$WORK/sources.txt"
 "$JAVAC" -encoding UTF-8 -source 8 -target 8 -classpath "$PLATFORM" -d "$WORK/classes" "@$WORK/sources.txt"
 mapfile_compat=()

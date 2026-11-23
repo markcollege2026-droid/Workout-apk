@@ -182,10 +182,72 @@ jobs:
           "$BT/apksigner" verify --verbose --print-certs release/Forge-Workout.apk | tee release/apk-signature.txt
           "$BT/zipalign" -c 4 release/Forge-Workout.apk
           "$BT/aapt2" dump badging release/Forge-Workout.apk > release/apk-manifest.txt
+          "$BT/aapt2" dump xmltree --file AndroidManifest.xml release/Forge-Workout.apk > release/apk-manifest-tree.txt
           if grep -Fq "uses-permission: name='android.permission.INTERNET'" release/apk-manifest.txt; then
             echo "::error::Unexpected INTERNET permission. This app must stay offline."
             exit 1
           fi
+          # The shipped personal-release APK must not be debuggable (this also disables WebView debugging).
+          python3 - <<'MANIFEST'
+          import re, sys
+          from pathlib import Path
+          badging = Path('release/apk-manifest.txt').read_text(errors='replace')
+          tree = Path('release/apk-manifest-tree.txt').read_text(errors='replace')
+          print('--- aapt2 badging (first 12 lines) ---')
+          print('\n'.join(badging.splitlines()[:12]))
+          print('--- end badging ---')
+          problems = []
+
+          def numeric(text):
+              """Turn the value part of an aapt2 line into a decimal string."""
+              tail = text.split('=')[-1].strip()
+              match = re.search(r"0x([0-9a-fA-F]+)\s*$", tail)
+              if match:
+                  return str(int(match.group(1), 16))
+              match = re.search(r"(\d+)\s*'?\s*$", tail)
+              return match.group(1) if match else None
+
+          def badging_sdk(text, key):
+              for line in text.splitlines():
+                  if re.match(rf"\s*{key}:", line):
+                      return numeric(line)
+              return None
+
+          def tree_sdk(text, key):
+              for line in text.splitlines():
+                  if key.lower() in line.lower():
+                      return numeric(line)
+              return None
+
+          def sdk_lines(text, key):
+              return [line.strip() for line in text.splitlines() if key.lower() in line.lower()][:3]
+
+          package = re.search(r"package: name='([^']+)'", badging)
+          package = package.group(1) if package else None
+          activity = re.search(r"launchable-activity: name='([^']+)'", badging)
+          activity = activity.group(1) if activity else None
+          # minSdk is an exact "sdkVersion:" line in badging (targetSdkVersion has its own prefix)
+          # and an attribute in the manifest tree; accept either source.
+          min_sdk = badging_sdk(badging, 'sdkVersion') or tree_sdk(tree, 'minSdkVersion')
+          target_sdk = badging_sdk(badging, 'targetSdkVersion') or tree_sdk(tree, 'targetSdkVersion')
+          if 'application-debuggable' in badging or ':debuggable(' in tree:
+              problems.append('the release APK is debuggable (build without the debug flag)')
+          if package != 'app.forge.workout':
+              problems.append(f'package name is {package!r}, expected app.forge.workout')
+          if min_sdk != '26':
+              problems.append(f'minSdkVersion is {min_sdk!r}, expected 26; badging={sdk_lines(badging, "sdkVersion")} tree={sdk_lines(tree, "minSdkVersion")}')
+          if target_sdk != '35':
+              problems.append(f'targetSdkVersion is {target_sdk!r}, expected 35; badging={sdk_lines(badging, "targetSdkVersion")} tree={sdk_lines(tree, "targetSdkVersion")}')
+          if activity != 'app.forge.workout.MainActivity':
+              problems.append(f'launcher activity is {activity!r}')
+          if 'android.permission.INTERNET' in badging or 'android.permission.INTERNET' in tree:
+              problems.append('the APK requests INTERNET')
+          print('Manifest check:', package, '| minSdk', min_sdk, '| targetSdk', target_sdk, '| activity', activity)
+          if problems:
+              for problem in problems:
+                  print(f'::error::{problem}')
+              sys.exit(1)
+          MANIFEST
           python3 - <<'PY'
           from pathlib import Path
           import hashlib, os, zipfile
@@ -194,6 +256,15 @@ jobs:
               assert 'classes.dex' in archive.namelist(), 'Compiled Android code is missing'
               assert 'assets/www/forge.js' in archive.namelist(), 'Offline UI bundle is missing'
               assert archive.getinfo('res/raw/complete.wav').compress_type == 0, 'Timer sound must be stored uncompressed'
+              # The APK must carry the same bundle the repository ships.
+              packaged = hashlib.sha256(archive.read('assets/www/forge.js')).hexdigest()
+              source = hashlib.sha256(Path('www/forge.js').read_bytes()).hexdigest()
+              assert packaged == source, 'APK bundle differs from www/forge.js'
+              manifest_text = Path('release/apk-manifest.txt').read_text()
+              assert 'android.permission.INTERNET' not in manifest_text
+              dex = archive.read('classes.dex')
+              for symbol in (b'onNativeWorkFinished', b'previousState', b'restorePrevious', b'keepScreenAwake'):
+                  assert symbol in dex, 'Compiled code is missing native bridge: ' + symbol.decode()
           digest = hashlib.sha256(apk.read_bytes()).hexdigest()
           Path('release/SHA256SUMS.txt').write_text(digest + '  Forge-Workout.apk\n')
           Path('release/build-details.txt').write_text(
@@ -202,6 +273,7 @@ jobs:
               + 'Run: ' + os.environ['GITHUB_RUN_ID'] + '\n'
               + 'Source: ' + os.environ['GITHUB_SERVER_URL'] + '/' + os.environ['GITHUB_REPOSITORY'] + '\n'
               + 'Android minimum API: 26; compile/target API: 35; build tools: 35.0.0\n'
+              + 'Debuggable: no (personal release; WebView debugging disabled)\n'
               + 'Signing: personal-use debug key restored from Actions secret\n'
               + 'APK SHA-256: ' + digest + '\n'
           )

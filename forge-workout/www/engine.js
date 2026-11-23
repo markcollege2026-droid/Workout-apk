@@ -19,6 +19,9 @@ const ex = (s,id)=>s.exercises.find(e=>e.id===id);
 const key = (a,b)=>[a,b].sort().join('|');
 const number = (v,d=0)=>Number.isFinite(Number(v))?Number(v):d;
 const rounded = n=>Math.round(n*100)/100;
+// Absolute input safety limits. These are the only limits applied to an explicitly
+// entered manual target; the exercise min/max range governs AUTOMATIC progression only.
+const LIMITS={weight:{min:0,max:1000},reps:{min:1,max:3600}};
 function canPair(s,a,b){
   if(a.id===b.id) return false;
   const ga=a.pairGroup||a.group, gb=b.pairGroup||b.group;
@@ -56,13 +59,38 @@ function roundWeight(s,e,w,mode='nearest'){
 }
 function target(s,e){
   const t=s.targets[e.id]||{weight:null,reps:e.min};
-  return {weight:roundWeight(s,e,t.weight===null?e.suggested:t.weight),reps:Math.max(e.min,Math.min(e.max,number(t.reps,e.min))),configured:t.weight!==null};
+  // A manual override is an explicit user decision. It is preserved exactly: never
+  // rounded onto equipment, never clamped to the exercise range, never replaced by a
+  // suggestion. Only the absolute input limits below apply.
+  if(t.manual===true&&t.weight!==null&&Number.isFinite(Number(t.weight))){
+    const weight=Math.max(LIMITS.weight.min,Math.min(LIMITS.weight.max,Number(t.weight)));
+    const reps=Math.max(LIMITS.reps.min,Math.min(LIMITS.reps.max,Math.round(number(t.reps,e.min))));
+    return {weight,reps,configured:true,manual:true,loadable:loadable(s,e).some(v=>Math.abs(v-weight)<.001)};
+  }
+  const weight=roundWeight(s,e,t.weight===null?e.suggested:t.weight);
+  return {weight,reps:Math.max(e.min,Math.min(e.max,number(t.reps,e.min))),configured:t.weight!==null,manual:false,
+    loadable:loadable(s,e).some(v=>Math.abs(v-weight)<.001)};
+}
+function isManual(s,id){return s.targets[id]?.manual===true;}
+// Explicit user-entered target. Validates absolute limits and keeps the entered values.
+function setTarget(s,e,weight,reps){
+  const w=Number(weight),r=Number(reps);
+  const unit=e.type==='timed'?'seconds':'reps';
+  if(!Number.isFinite(w)||weight===''||weight===null)return {error:'Enter a weight between '+LIMITS.weight.min+' and '+LIMITS.weight.max+' kg.'};
+  if(w<LIMITS.weight.min||w>LIMITS.weight.max)return {error:'Weights must be between '+LIMITS.weight.min+' and '+LIMITS.weight.max+' kg.'};
+  if(reps===''||reps===null||!Number.isFinite(r)||!Number.isInteger(r))return {error:'Enter a whole number of '+unit+'.'};
+  if(r<LIMITS.reps.min||r>LIMITS.reps.max)return {error:'Target '+unit+' must be between '+LIMITS.reps.min+' and '+LIMITS.reps.max+'.'};
+  const stored={weight:rounded(w),reps:r,manual:true,overriddenAt:Date.now()};
+  s.targets[e.id]=stored;
+  // The explicit choice supersedes any pending automatic proposal for this exercise.
+  if(s.suggestions[e.id])delete s.suggestions[e.id];
+  return {ok:true,target:{...stored},outsideRange:r<e.min||r>e.max,loadable:loadable(s,e).some(v=>Math.abs(v-stored.weight)<.001)};
 }
 function rest(s,e){return e.rest===null||e.rest===undefined?s.settings.rest:e.rest;}
 function makeEntries(s,selected){
   return s.exercises.filter(e=>e.active&&e.primary&&selected.includes(e.block)).sort((a,b)=>a.order-b.order).map(e=>{
     const t=target(s,e);
-    return {id:uid(),exerciseId:e.id,sourceId:e.id,pairGroup:e.group,sets:e.sets,targetWeight:t.weight,targetReps:t.reps,skipped:false};
+    return {id:uid(),exerciseId:e.id,sourceId:e.id,pairGroup:e.group,sets:e.sets,targetWeight:t.weight,targetReps:t.reps,manualTarget:t.manual===true,skipped:false};
   });
 }
 function planEntries(s,entries,records=[]){
@@ -103,8 +131,12 @@ function planEntries(s,entries,records=[]){
       const active=group.filter(e=>r<e.remaining);
       for(let i=0;i<active.length;i++){
         const e=active[i]; const last=i===active.length-1;
+        // A manual target below the normal range is judged against the target the user
+        // actually chose, so an intentional low target is never flagged as a failure.
+        const floor=e.manualTarget?Math.min(e.min,Math.max(1,Math.round(number(e.targetReps,e.min)))):e.min;
         queue.push({id:uid(),entryId:e.entryId,exerciseId:e.id,setIndex:e.done+r+1,sets:e.sets,warmup:false,
-          weight:e.targetWeight,reps:e.targetReps,min:e.min,max:e.max,kind:group.length===3?'triple':group.length===2?'superset':'straight',transition:!last,
+          weight:e.targetWeight,reps:e.targetReps,min:floor,max:e.max,manualTarget:e.manualTarget===true,
+          kind:group.length===3?'triple':group.length===2?'superset':'straight',transition:!last,
           group:g,restAfter:last?Math.max(...active.map(x=>rest(s,x))):s.settings.transition});
       }
     }
@@ -129,20 +161,65 @@ function plan(s,selected,budget=null){
 }
 function newSession(s,planned){
   return {id:uid(),startedAt:Date.now(),endedAt:null,blocks:clone(s.settings.selectedBlocks),entries:clone(planned.entries),
-    queue:clone(planned.queue),records:[],timer:null,pendingLogId:null,note:'',estimateSeconds:planned.seconds,
+    queue:clone(planned.queue),records:[],timer:null,workTimer:null,pendingLogId:null,note:'',estimateSeconds:planned.seconds,
     straightSeconds:planned.straightSeconds,dropped:planned.dropped||[],exerciseSnapshot:Object.fromEntries(s.exercises.map(e=>[e.id,clone(e)]))};
 }
 function bodyweight(s,at=Date.now()){
   return s.bodyweights.filter(b=>b.date<=localDate(at)).sort((a,b)=>b.date.localeCompare(a.date))[0]?.weight??null;
 }
-function completeSet(s){
+function completeSet(s,actual=null){
   const session=s.session;if(!session||!session.queue.length)return null;
-  const task=session.queue.shift(),e=ex(s,task.exerciseId);
-  const rec={...clone(task),id:uid(),task:clone(task),at:Date.now(),weight:task.weight,reps:task.reps,
+  // The work countdown owns the current timed task until it finishes or is cancelled.
+  if(session.workTimer)return null;
+  const task=session.queue[0],e=ex(s,task.exerciseId);
+  // A timed exercise is never logged without its work countdown: the elapsed duration
+  // comes from startWork()/finishWork(). Weighted and rep-based sets never use it.
+  if(e&&e.type==='timed'&&!task.warmup&&!actual)return null;
+  session.queue.shift();
+  const elapsed=actual&&Number.isFinite(Number(actual.reps))?Math.max(0,Math.min(LIMITS.reps.max,Math.round(Number(actual.reps)))):null;
+  const reps=elapsed===null?task.reps:elapsed;
+  const rec={...clone(task),id:uid(),task:clone(task),at:Date.now(),weight:task.weight,reps,
+    plannedReps:task.reps,early:!!(actual&&actual.early)&&reps<task.reps,
     confirmed:false,rir:null,note:'',failed:false,bodyweight:bodyweight(s)};
   session.records.push(rec);session.pendingLogId=rec.id;
   session.timer={deadline:Date.now()+task.restAfter*1000,total:task.restAfter,kind:task.warmup?'warmup':task.transition?'transition':'rest'};
   return rec;
+}
+/* ---- Work timer: times a timed exercise. Separate from the rest/transition timer. ---- */
+function startWork(s,at=Date.now()){
+  const session=s.session;if(!session)return {error:'No active workout.'};
+  if(session.workTimer)return {error:'A work timer is already running.'};
+  if(session.pendingLogId)return {error:'Confirm the set you just finished first.'};
+  if(session.timer)return {error:'Your rest timer is still running. Skip it before starting the next set.'};
+  const task=session.queue[0];if(!task)return {error:'No sets left in this workout.'};
+  const e=ex(s,task.exerciseId);if(!e)return {error:'This exercise is no longer available.'};
+  if(e.type!=='timed'||task.warmup)return {error:'This set is not timed by the clock. Use Set done.'};
+  const total=Math.max(1,Math.min(LIMITS.reps.max,Math.round(number(task.reps,e.min))));
+  const timer={deadline:Math.round(at)+total*1000,total,startedAt:Math.round(at),taskId:task.id,entryId:task.entryId,exerciseId:e.id};
+  session.workTimer=timer;
+  return {ok:true,timer:{...timer},exercise:e,total};
+}
+/* Ends the work countdown, logs the ACTUAL elapsed seconds and starts the normal rest
+   timer. Clearing workTimer first makes a duplicate completion callback a no-op. */
+function finishWork(s,options={}){
+  const session=s.session,timer=session&&session.workTimer;
+  if(!timer)return null;
+  const at=Number.isFinite(Number(options.at))?Number(options.at):Date.now();
+  let seconds;
+  if(options.elapsed!==null&&options.elapsed!==undefined&&options.elapsed!==''&&Number.isFinite(Number(options.elapsed))){
+    seconds=Math.round(Number(options.elapsed));
+  }else{
+    const started=timer.deadline-timer.total*1000;
+    seconds=Math.round((Math.min(at,timer.deadline)-started)/1000);
+  }
+  seconds=Math.max(0,Math.min(timer.total,Math.min(LIMITS.reps.max,seconds)));
+  session.workTimer=null;
+  const rec=completeSet(s,{reps:seconds,early:seconds<timer.total});
+  return rec?{record:rec,seconds,early:rec.early}:null;
+}
+function cancelWork(s){
+  const session=s.session;if(!session||!session.workTimer)return false;
+  session.workTimer=null;return true;
 }
 function undoSet(s){
   const session=s.session;if(!session||!session.records.length)return false;
@@ -151,7 +228,7 @@ function undoSet(s){
   // A task whose entry was skipped or substituted away after the set was logged must not
   // re-enter the queue; the record is still undone without resurrecting skipped work.
   if(en&&!en.skipped)session.queue.unshift(clone(rec.task));
-  session.pendingLogId=null;session.timer=null;return true;
+  session.pendingLogId=null;session.timer=null;session.workTimer=null;return true;
 }
 function fullRecords(session,id){
   const en=session.entries.find(e=>e.exerciseId===id);
@@ -215,7 +292,7 @@ function finishSession(s){
   const session=s.session;if(!session)return null;
   session.records.forEach(r=>{r.confirmed=true;r.failed=r.failed||(!r.warmup&&r.reps<(r.min||ex(s,r.exerciseId).min));});
   session.endedAt=Date.now();session.durationSeconds=Math.max(0,Math.round((session.endedAt-session.startedAt)/1000));
-  session.timer=null;session.pendingLogId=null;
+  session.timer=null;session.workTimer=null;session.pendingLogId=null;
   session.queue=[];
   session.records.forEach(r=>{delete r.task;});
   session.exerciseSnapshot=Object.fromEntries(session.entries.map(en=>[en.exerciseId,session.exerciseSnapshot[en.exerciseId]]));
@@ -225,7 +302,9 @@ function finishSession(s){
 }
 function accept(s,id,weight=null,reps=null){
   const sug=s.suggestions[id];if(!sug)return false;
-  s.targets[id]={weight:weight===null?sug.weight:weight,reps:reps===null?sug.reps:reps};sug.accepted=true;return true;
+  // Accepting a proposal is an automatic-origin target, not a manual override: it keeps
+  // normal rounding/clamping behaviour. Only an explicit edit is marked manual.
+  s.targets[id]={weight:weight===null?sug.weight:weight,reps:reps===null?sug.reps:reps,manual:false};sug.accepted=true;return true;
 }
 function substitute(s,entryId){
   const sess=s.session,en=sess?.entries.find(x=>x.id===entryId);if(!en)return {error:'No exercise to replace.'};
@@ -235,7 +314,7 @@ function substitute(s,entryId){
   if(!next)return {error:'No unused substitutes left. Edit the substitute list or skip today.'};
   en.skipped=true;const e=ex(s,next),t=target(s,e);
   const replacement={id:uid(),exerciseId:e.id,sourceId:en.sourceId,pairGroup:en.pairGroup,sets:e.sets,
-    targetWeight:t.weight,targetReps:t.reps,skipped:false};
+    targetWeight:t.weight,targetReps:t.reps,manualTarget:t.manual===true,skipped:false};
   sess.entries.push(replacement);sess.exerciseSnapshot[e.id]=clone(e);
   sess.queue=planEntries(s,sess.entries,sess.records).queue;
   return {exercise:e,entry:replacement,needsWeight:!t.configured};
@@ -292,7 +371,13 @@ function validate(s){
   }
   for(const e of s.exercises)if(e.substitutes.some(id=>!ids.has(id)||id===e.id))fail('unknown substitute');
   if(!s.settings||!s.targets||Array.isArray(s.targets)||!s.pairOverrides||Array.isArray(s.pairOverrides)||!s.suggestions||Array.isArray(s.suggestions)||!Array.isArray(s.sessions)||s.sessions.length>10000||!Array.isArray(s.bodyweights))fail('missing data');
-  for(const id of ids){const t=s.targets[id];if(!t||(t.weight!==null&&!finite(t.weight,0,1000))||!Number.isInteger(t.reps)||!finite(t.reps,1,3600))fail('targets');}
+  for(const id of ids){
+    const t=s.targets[id];
+    if(!t||(t.weight!==null&&!finite(t.weight,0,1000))||!Number.isInteger(t.reps)||!finite(t.reps,1,3600))fail('targets');
+    // Manual overrides are stored with an explicit flag; older backups simply omit it.
+    if(t.manual!==undefined&&typeof t.manual!=='boolean')fail('targets');
+    if(t.overriddenAt!==undefined&&!finite(t.overriddenAt,0,1e14))fail('targets');
+  }
   for(const [k,v] of Object.entries(s.pairOverrides)){const pair=k.split('|');if(pair.length!==2||pair.some(id=>!ids.has(id))||typeof v!=='boolean')fail('pairing override');}
   for(const [id,q] of Object.entries(s.suggestions))if(!ids.has(id)||!q||q.exerciseId!==id||!['hold','raise','reps','time','deload','variation'].includes(q.kind)||!finite(q.weight,0,1000)||!finite(q.reps,1,3600)||typeof q.reason!=='string'||typeof q.accepted!=='boolean')fail('progression suggestion');
   const cfg=s.settings;
@@ -304,15 +389,24 @@ function validate(s){
   for(const b of s.bodyweights)if(!finite(b.weight,1,500)||!/^\d{4}-\d{2}-\d{2}$/.test(b.date)||!Number.isFinite(new Date(b.date+'T12:00:00').getTime()))fail('bodyweight log');
   for(const sess of [...s.sessions,...(s.session?[s.session]:[])]){
     if(!sess||typeof sess.id!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(sess.id)||!Array.isArray(sess.blocks)||sess.blocks.some(id=>!['chest','back','legs','abs','shoulders','forearms'].includes(id))||!finite(sess.startedAt,0,1e14)||!Array.isArray(sess.entries)||!Array.isArray(sess.records)||!Array.isArray(sess.queue))fail('session');
-    for(const en of sess.entries)if(!ids.has(en.exerciseId)||!ids.has(en.sourceId)||!Number.isInteger(en.sets)||!finite(en.sets,1,20)||typeof en.id!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(en.id)||typeof en.skipped!=='boolean'||!finite(en.targetWeight,0,1000)||!finite(en.targetReps,1,3600))fail('session exercise');
+    for(const en of sess.entries){
+      if(!ids.has(en.exerciseId)||!ids.has(en.sourceId)||!Number.isInteger(en.sets)||!finite(en.sets,1,20)||typeof en.id!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(en.id)||typeof en.skipped!=='boolean'||!finite(en.targetWeight,0,1000)||!finite(en.targetReps,1,3600))fail('session exercise');
+      if(en.manualTarget!==undefined&&typeof en.manualTarget!=='boolean')fail('session exercise');
+    }
     for(const r of [...sess.records,...sess.queue])if(!ids.has(r.exerciseId)||!finite(r.weight,0,1000)||!finite(r.reps,0,3600)||typeof r.entryId!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(r.entryId)||!sess.entries.some(en=>en.id===r.entryId))fail('set data');
     for(const r of sess.records)if(typeof r.confirmed!=='boolean'||typeof r.warmup!=='boolean'||(r.rir!==null&&(!Number.isInteger(r.rir)||r.rir<0||r.rir>3))||typeof r.note!=='string')fail('logged set');
     if(sess===s.session&&sess.records.some(r=>!r.task||typeof r.task.exerciseId!=='string'))fail('active set undo data');
     if(sess.pendingLogId!==null&&!sess.records.some(r=>r.id===sess.pendingLogId))fail('pending log');
     if(sess.timer&&(!finite(sess.timer.deadline,0,1e14)||!finite(sess.timer.total,0,86400)))fail('active timer');
+    if(sess.workTimer){
+      const w=sess.workTimer;
+      if(typeof w.taskId!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(w.taskId)||typeof w.entryId!=='string'||!finite(w.deadline,0,1e14)||!finite(w.total,1,3600)||!finite(w.startedAt,0,1e14))fail('active work timer');
+      if(sess.timer)fail('overlapping rest and work timers');
+    }
+    for(const r of sess.records)if(r.early!==undefined&&typeof r.early!=='boolean')fail('logged set');
   }
   return true;
 }
-const api={GROUPS,clone,uid,ex,key,canPair,loadable,roundWeight,target,rest,makeEntries,planEntries,plan,newSession,bodyweight,completeSet,undoSet,fullRecords,exerciseHistory,lastRecords,suggestion,finishSession,accept,substitute,skip,actualLoad,epley,stats,stalled,weeklyVolume,localDate,streak,validate};
+const api={GROUPS,LIMITS,clone,uid,ex,key,canPair,loadable,roundWeight,target,isManual,setTarget,rest,makeEntries,planEntries,plan,newSession,bodyweight,completeSet,startWork,finishWork,cancelWork,undoSet,fullRecords,exerciseHistory,lastRecords,suggestion,finishSession,accept,substitute,skip,actualLoad,epley,stats,stalled,weeklyVolume,localDate,streak,validate};
 if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.ForgeEngine=api;
 })(typeof window!=='undefined'?window:globalThis);
