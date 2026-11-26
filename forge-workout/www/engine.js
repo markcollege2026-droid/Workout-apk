@@ -159,10 +159,7 @@ function recomputeSuggestions(s,now=Date.now()){
   return stored;
 }
 function outstandingSuggestions(s){return Object.values(s.suggestions||{}).filter(outstanding);}
-function findSuggestion(s,id,signature=null){
-  const q=s.suggestions?.[id];if(!q)return null;
-  return signature&&q.signature!==signature?null:q;
-}
+function findSuggestion(s,id){return s.suggestions?.[id]||null;}
 // Explicit user-entered target. Validates absolute limits and keeps the entered values.
 function setTarget(s,e,weight,reps){
   const w=Number(weight),r=Number(reps);
@@ -427,12 +424,6 @@ function reject(s,id){
   delete sug.deferredAt;
   return true;
 }
-/* Undo a deferral so the proposal is outstanding again without a new decision prompt. */
-function reopenDeferred(s,id){
-  const sug=findSuggestion(s,id);if(!sug||sug.decision!=='deferred')return false;
-  sug.decision='pending';sug.accepted=false;delete sug.deferredAt;sug.decidedAt=null;
-  return true;
-}
 function substitute(s,entryId){
   const sess=s.session,en=sess?.entries.find(x=>x.id===entryId);if(!en)return {error:'No exercise to replace.'};
   const original=ex(s,en.sourceId);const candidates=original.substitutes||[];
@@ -565,6 +556,6 @@ function validate(s){
   return true;
 }
 const api={GROUPS,LIMITS,clone,uid,ex,key,canPair,loadable,roundWeight,target,isManual,setTarget,rest,makeEntries,planEntries,plan,newSession,bodyweight,completeSet,startWork,finishWork,cancelWork,undoSet,fullRecords,exerciseHistory,lastRecords,suggestion,finishSession,accept,substitute,skip,actualLoad,epley,stats,stalled,weeklyVolume,localDate,streak,validate,migrate,
-  DECISIONS,suggestionSignature,outstanding,decided,normalizeSuggestion,recordSuggestions,retireSuggestions,recomputeSuggestions,outstandingSuggestions,findSuggestion,defer,reject,reopenDeferred};
+  DECISIONS,suggestionSignature,outstanding,decided,normalizeSuggestion,recordSuggestions,retireSuggestions,recomputeSuggestions,outstandingSuggestions,findSuggestion,defer,reject};
 if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.ForgeEngine=api;
 })(typeof window!=='undefined'?window:globalThis);

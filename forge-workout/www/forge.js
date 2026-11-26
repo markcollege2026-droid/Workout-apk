@@ -336,11 +336,9 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   function outstandingSuggestions(s) {
     return Object.values(s.suggestions || {}).filter(outstanding);
   }
-  function findSuggestion(s, id, signature = null) {
+  function findSuggestion(s, id) {
     var _a;
-    const q = (_a = s.suggestions) == null ? void 0 : _a[id];
-    if (!q) return null;
-    return signature && q.signature !== signature ? null : q;
+    return ((_a = s.suggestions) == null ? void 0 : _a[id]) || null;
   }
   function setTarget(s, e, weight, reps) {
     var _a;
@@ -722,15 +720,6 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     delete sug.deferredAt;
     return true;
   }
-  function reopenDeferred(s, id) {
-    const sug = findSuggestion(s, id);
-    if (!sug || sug.decision !== "deferred") return false;
-    sug.decision = "pending";
-    sug.accepted = false;
-    delete sug.deferredAt;
-    sug.decidedAt = null;
-    return true;
-  }
   function substitute(s, entryId) {
     const sess = s.session, en = sess == null ? void 0 : sess.entries.find((x) => x.id === entryId);
     if (!en) return { error: "No exercise to replace." };
@@ -967,8 +956,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     outstandingSuggestions,
     findSuggestion,
     defer,
-    reject,
-    reopenDeferred
+    reject
   };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.ForgeEngine = api;
