@@ -171,6 +171,8 @@ const path=require('node:path');
     const s=ForgeApp.s(),E=ForgeEngine;
     s.session=null;ForgeApp.ui.planned=null;ForgeApp.ui.reviewed=false;
     s.settings.warmups=false;
+    // Deterministic review state: only the two performances created below are outstanding.
+    s.suggestions={};
     for(const e of s.exercises)if(s.targets[e.id].weight===null)s.targets[e.id].weight=20;
     const now=Date.now();
     const make=(id,at)=>{
@@ -191,21 +193,37 @@ const path=require('node:path');
   await expect(featurePage.locator('[data-action="review-start"]')).toBeVisible();
   const reviewOutstanding=await featurePage.evaluate(()=>ForgeEngine.outstandingSuggestions(ForgeApp.s()).length);
   expect(reviewOutstanding).toBe(2);
+  const beforeDecide=await featurePage.evaluate(()=>{const s=ForgeApp.s();const q=ForgeEngine.outstandingSuggestions(s).map(x=>({id:x.exerciseId,decision:x.decision,source:x.sourceSessionId,target:ForgeEngine.target(s,ForgeEngine.ex(s,x.exerciseId))}));return q;});
+  // Defer keeps the item outstanding, unapplied, and listed; it is never regenerated.
   await featurePage.locator('[data-action="review-defer"]').first().click();
+  const deferredId=beforeDecide[0].id;
+  const afterDefer=await featurePage.evaluate(id=>{const s=ForgeApp.s(),q=s.suggestions[id];return {decision:q.decision,source:q.sourceSessionId,target:ForgeEngine.target(s,ForgeEngine.ex(s,id)),outstanding:ForgeEngine.outstandingSuggestions(s).length};},deferredId);
+  expect(afterDefer.decision).toBe('deferred');
+  expect(afterDefer.source).toBe(beforeDecide[0].source);
+  expect(afterDefer.target.weight).toBe(beforeDecide[0].target.weight);
+  expect(afterDefer.target.reps).toBe(beforeDecide[0].target.reps);
+  expect(afterDefer.outstanding).toBe(2);
+  await expect(featurePage.locator('#modal-title')).toContainText('Before you train');
+  // Only the rejected one leaves the outstanding list.
   await featurePage.locator('[data-action="review-reject"]').first().click();
-  const reviewed=await featurePage.evaluate(()=>({outstanding:ForgeEngine.outstandingSuggestions(ForgeApp.s()).length,decisions:Object.values(ForgeApp.s().suggestions).map(q=>q.decision).sort()}));
-  expect(reviewed.outstanding).toBe(0);
-  expect(reviewed.decisions).toEqual(['rejected']);
-  expect(await featurePage.evaluate(()=>document.querySelector('#modal-root').innerHTML)).toBe('');
-  // With nothing outstanding the next plan starts with no prompt at all.
-  await featurePage.locator('[data-action="plan-workout"]').click();
-  expect(await featurePage.evaluate(()=>document.querySelector('#modal-root').innerHTML)).toBe('');
+  const reviewed=await featurePage.evaluate(()=>({outstanding:ForgeEngine.outstandingSuggestions(ForgeApp.s()).map(q=>q.decision).sort(),decisions:Object.values(ForgeApp.s().suggestions).map(q=>q.decision).sort()}));
+  expect(reviewed.outstanding).toEqual(['deferred']);
+  expect(reviewed.decisions).toEqual(['deferred','rejected']);
+  // Starting without accepting builds the plan; the deferred item was not applied.
+  await featurePage.locator('[data-action="review-start"]').click();
+  await expect(featurePage.locator('h1')).toContainText('streamlined');
   expect(await featurePage.evaluate(()=>!!ForgeApp.ui.planned)).toBe(true);
-  // Recalculation and rerender recreate no prompt for the rejected proposal.
-  await featurePage.evaluate(()=>{ForgeEngine.recomputeSuggestions(ForgeApp.s());ForgeApp.save();ForgeApp.ui.reviewed=false;ForgeApp.ui.planned=null;ForgeApp.render();});
+  // Recalculation and rerender never duplicate or revive decided proposals.
+  await featurePage.evaluate(()=>{ForgeEngine.recomputeSuggestions(ForgeApp.s());ForgeApp.save();ForgeApp.ui.planned=null;ForgeApp.render();});
+  const afterRecompute=await featurePage.evaluate(()=>({decisions:Object.values(ForgeApp.s().suggestions).map(q=>q.decision).sort(),outstanding:ForgeEngine.outstandingSuggestions(ForgeApp.s()).length}));
+  expect(afterRecompute.decisions).toEqual(['deferred','rejected']);
+  expect(afterRecompute.outstanding).toBe(1);
+  // The deferred item comes back for the next workout review; the rejected one stays quiet.
+  await featurePage.locator('[data-action="nav"][data-route="today"]:visible').first().click();
   await featurePage.locator('[data-action="plan-workout"]').click();
-  expect(await featurePage.evaluate(()=>ForgeEngine.outstandingSuggestions(ForgeApp.s()).length)).toBe(0);
-  expect(await featurePage.evaluate(()=>document.querySelector('#modal-root').innerHTML)).toBe('');
+  await expect(featurePage.locator('#modal-title')).toContainText('Before you train');
+  expect(await featurePage.evaluate(()=>ForgeEngine.outstandingSuggestions(ForgeApp.s()).map(q=>q.decision))).toEqual(['deferred']);
+  await featurePage.locator('[data-action="review-dismiss"]').click();
   check('Pre-workout review accepts/rejects/defers without duplicates and never blocks starting');
   await featurePage.reload();
   await featurePage.locator('[data-action="nav"][data-route="settings"]:visible').first().click();
