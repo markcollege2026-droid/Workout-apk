@@ -175,7 +175,8 @@ test('accepting a suggestion stays automatic while a manual edit is marked manua
   assert.equal(E.target(s,d).weight,28,'automatic targets keep rounding');
   E.setTarget(s,d,27.5,8);
   assert.equal(E.target(s,d).weight,27.5,'an explicit edit of the same value is kept');
-  assert.equal(s.suggestions[d.id].decision,'rejected','an explicit edit settles the accepted proposal as rejected');
+  assert.equal(s.suggestions[d.id].decision,'accepted','a later manual edit never rewrites an acceptance');
+  assert(s.suggestions[d.id].manualOverrideAt,'the manual edit is recorded next to the acceptance');
 });
 
 test('changing the equipment list keeps manual overrides and re-rounds automatic ones',()=>{

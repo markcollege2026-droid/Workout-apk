@@ -265,13 +265,15 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   function normalizeSuggestion(q) {
     return __spreadProps(__spreadValues({}, q), { decision: DECISIONS.includes(q.decision) ? q.decision : q.accepted === true ? "accepted" : "pending", decidedAt: Number.isFinite(q.decidedAt) ? q.decidedAt : null });
   }
-  function adoptDecision(prev, q, now = Date.now()) {
+  function adoptDecision(prev, q) {
     var _a;
     if (!prev) return q;
     const same = prev.signature === q.signature || prev.sourceSessionId === q.sourceSessionId && prev.kind === q.kind && prev.weight === q.weight && prev.reps === q.reps;
     if (!same) return q;
     const out = __spreadProps(__spreadValues({}, q), { decision: prev.decision, decidedAt: (_a = prev.decidedAt) != null ? _a : null });
-    if (prev.decision === "deferred") out.deferredAt = now;
+    for (const f of ["deferredAt", "rejectedAt", "manualOverrideAt", "targetSnapshot"]) if (prev[f] !== void 0) out[f] = prev[f];
+    if (prev.decision !== "rejected") delete out.rejectedAt;
+    if (prev.decision !== "deferred") delete out.deferredAt;
     return out;
   }
   function recordSuggestions(s, session, now = Date.now()) {
@@ -283,7 +285,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       if (!sug) continue;
       const q = normalizeSuggestion(__spreadProps(__spreadValues({}, sug), { sourceSessionId: session.id, createdAt: now }));
       q.signature = suggestionSignature(q, e.id);
-      stored[e.id] = adoptDecision(stored[e.id], q, now);
+      stored[e.id] = adoptDecision(stored[e.id], q);
     }
     retireSuggestions(s);
   }
@@ -326,7 +328,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       const prev = stored[e.id];
       if (!prev || prev.signature !== q.signature) {
         if (!prev || !sourceIsCurrent(s, e, prev) || staleDecision(prev, q)) stored[e.id] = q;
-        else stored[e.id] = adoptDecision(prev, q, now);
+        else stored[e.id] = adoptDecision(prev, q);
       }
     }
     for (const id of Object.keys(stored)) if (!seen.has(id)) delete stored[id];
@@ -350,15 +352,21 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     if (r < LIMITS.reps.min || r > LIMITS.reps.max) return { error: "Target " + unit + " must be between " + LIMITS.reps.min + " and " + LIMITS.reps.max + "." };
     const stored = { weight: rounded(w), reps: r, manual: true, overriddenAt: Date.now() };
     s.targets[e.id] = stored;
-    const outstandingRecord = (_a = s.suggestions) == null ? void 0 : _a[e.id];
-    if (outstandingRecord && outstandingRecord.decision !== "rejected") {
-      outstandingRecord.decision = "rejected";
-      outstandingRecord.decidedAt = Date.now();
-      outstandingRecord.accepted = false;
-      outstandingRecord.targetSnapshot = { weight: stored.weight, reps: stored.reps };
-      outstandingRecord.decisionNote = "manual target kept";
+    const record = (_a = s.suggestions) == null ? void 0 : _a[e.id];
+    let settled = false;
+    if (record && outstanding(record)) {
+      record.decision = "rejected";
+      record.accepted = false;
+      record.decidedAt = Date.now();
+      record.rejectedAt = record.decidedAt;
+      delete record.deferredAt;
+      record.targetSnapshot = { weight: stored.weight, reps: stored.reps };
+      record.decisionNote = "manual target kept";
+      settled = true;
+    } else if (record && record.decision === "accepted") {
+      record.manualOverrideAt = Date.now();
     }
-    return { ok: true, target: __spreadValues({}, stored), outsideRange: r < e.min || r > e.max, loadable: loadable(s, e).some((v) => Math.abs(v - stored.weight) < 1e-3), settled: !!outstandingRecord };
+    return { ok: true, target: __spreadValues({}, stored), outsideRange: r < e.min || r > e.max, loadable: loadable(s, e).some((v) => Math.abs(v - stored.weight) < 1e-3), settled };
   }
   function rest(s, e) {
     return e.rest === null || e.rest === void 0 ? s.settings.rest : e.rest;
@@ -710,7 +718,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   }
   function reject(s, id) {
     const sug = findSuggestion(s, id);
-    if (!sug || sug.decision === "rejected") return false;
+    if (!sug || !outstanding(sug)) return false;
     const t = target(s, ex(s, id));
     sug.decision = "rejected";
     sug.accepted = false;
@@ -874,7 +882,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
         if (q.accepted !== (q.decision === "accepted")) fail("progression decision flag");
         if (q.sourceSessionId !== null && q.sourceSessionId !== void 0 && (typeof q.sourceSessionId !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(q.sourceSessionId))) fail("progression source");
         if (q.signature !== void 0 && typeof q.signature !== "string") fail("progression signature");
-        for (const f of ["createdAt", "decidedAt", "deferredAt", "rejectedAt"]) if (q[f] !== null && q[f] !== void 0 && !finite(q[f], 0, 1e14)) fail("progression timestamps");
+        for (const f of ["createdAt", "decidedAt", "deferredAt", "rejectedAt", "manualOverrideAt"]) if (q[f] !== null && q[f] !== void 0 && !finite(q[f], 0, 1e14)) fail("progression timestamps");
       }
     }
     const cfg = s.settings;

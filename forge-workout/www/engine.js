@@ -82,7 +82,14 @@ function isManual(s,id){return s.targets[id]?.manual===true;}
      rejected  — the target stayed unchanged; that proposal stays suppressed until a
                  NEW qualifying completed performance (a different sourceSessionId)
    `accepted:false` is only a compatibility mirror for unknown/legacy readers and never
-   distinguishes pending from rejected. */
+   distinguishes pending from rejected.
+   Timestamps record the USER's timeline and are never rewritten by recalculation:
+     createdAt        when this proposal was first generated
+     decidedAt        when the current accept/reject decision was made (null while deferred)
+     deferredAt       when the user deferred it (cleared when they accept/reject it)
+     rejectedAt       when the user rejected it
+     manualOverrideAt set when an ACCEPTED proposal's target was later edited by hand;
+                      the acceptance itself stays accepted (it did happen) */
 const DECISIONS=['pending','accepted','rejected','deferred'];
 function suggestionSignature(q,id){return [id,q.kind,rounded(q.weight),Math.round(q.reps),q.sourceSessionId].join('|');}
 function decided(q){return q.decision==='accepted'||q.decision==='rejected';}
@@ -90,12 +97,16 @@ function outstanding(q){return q.decision==='pending'||q.decision==='deferred';}
 /* A proposal that was decided is only reopened by a different completed performance. */
 function staleDecision(prev,q){return !!prev&&decided(prev)&&prev.sourceSessionId!==q.sourceSessionId;}
 function normalizeSuggestion(q){return {...q,decision:DECISIONS.includes(q.decision)?q.decision:(q.accepted===true?'accepted':'pending'),decidedAt:Number.isFinite(q.decidedAt)?q.decidedAt:null};}
-function adoptDecision(prev,q,now=Date.now()){
+function adoptDecision(prev,q){
   if(!prev)return q;
   const same=prev.signature===q.signature||(prev.sourceSessionId===q.sourceSessionId&&prev.kind===q.kind&&prev.weight===q.weight&&prev.reps===q.reps);
   if(!same)return q; // a materially different proposal is a new decision
+  // Same proposal: keep the decision and the timestamps that say when the user made it.
+  // Recalculation must not move a deferral or a rejection forward in time.
   const out={...q,decision:prev.decision,decidedAt:prev.decidedAt??null};
-  if(prev.decision==='deferred')out.deferredAt=now;
+  for(const f of ['deferredAt','rejectedAt','manualOverrideAt','targetSnapshot'])if(prev[f]!==undefined)out[f]=prev[f];
+  if(prev.decision!=='rejected')delete out.rejectedAt;
+  if(prev.decision!=='deferred')delete out.deferredAt;
   return out;
 }
 /* One record per exercise, and only for a completed performance: an exercise that was
@@ -108,7 +119,7 @@ function recordSuggestions(s,session,now=Date.now()){
     const sug=suggestion(s,e,session);if(!sug)continue;
     const q=normalizeSuggestion({...sug,sourceSessionId:session.id,createdAt:now});
     q.signature=suggestionSignature(q,e.id);
-    stored[e.id]=adoptDecision(stored[e.id],q,now);
+    stored[e.id]=adoptDecision(stored[e.id],q);
   }
   retireSuggestions(s);
 }
@@ -151,7 +162,7 @@ function recomputeSuggestions(s,now=Date.now()){
     const prev=stored[e.id];
     if(!prev||prev.signature!==q.signature){
       if(!prev||!sourceIsCurrent(s,e,prev)||staleDecision(prev,q))stored[e.id]=q;
-      else stored[e.id]=adoptDecision(prev,q,now);
+      else stored[e.id]=adoptDecision(prev,q);
     }
   }
   for(const id of Object.keys(stored))if(!seen.has(id))delete stored[id];
@@ -170,16 +181,26 @@ function setTarget(s,e,weight,reps){
   if(r<LIMITS.reps.min||r>LIMITS.reps.max)return {error:'Target '+unit+' must be between '+LIMITS.reps.min+' and '+LIMITS.reps.max+'.'};
   const stored={weight:rounded(w),reps:r,manual:true,overriddenAt:Date.now()};
   s.targets[e.id]=stored;
-  // An explicit choice settles the proposal as rejected: the decision is persisted instead
-  // of merely deleting the card, so recalculation cannot re-ask it. The record stays until
-  // a new qualifying performance generates a new proposal.
-  const outstandingRecord=s.suggestions?.[e.id];
-  if(outstandingRecord&&outstandingRecord.decision!=='rejected'){
-    outstandingRecord.decision='rejected';outstandingRecord.decidedAt=Date.now();outstandingRecord.accepted=false;
-    outstandingRecord.targetSnapshot={weight:stored.weight,reps:stored.reps};
-    outstandingRecord.decisionNote='manual target kept';
+  // An explicit choice settles an OUTSTANDING proposal as rejected: the decision is
+  // persisted instead of merely deleting the card, so recalculation cannot re-ask it. The
+  // record stays until a new qualifying performance generates a new proposal.
+  // A proposal that was already accepted keeps that decision: the acceptance really did
+  // happen and was applied, so a later manual edit is recorded alongside it
+  // (manualOverrideAt) instead of rewriting history as a rejection. Both states suppress
+  // the proposal equally, so nothing is re-asked either way.
+  const record=s.suggestions?.[e.id];
+  let settled=false;
+  if(record&&outstanding(record)){
+    record.decision='rejected';record.accepted=false;
+    record.decidedAt=Date.now();record.rejectedAt=record.decidedAt;
+    delete record.deferredAt;
+    record.targetSnapshot={weight:stored.weight,reps:stored.reps};
+    record.decisionNote='manual target kept';
+    settled=true;
+  }else if(record&&record.decision==='accepted'){
+    record.manualOverrideAt=Date.now();
   }
-  return {ok:true,target:{...stored},outsideRange:r<e.min||r>e.max,loadable:loadable(s,e).some(v=>Math.abs(v-stored.weight)<.001),settled:!!outstandingRecord};
+  return {ok:true,target:{...stored},outsideRange:r<e.min||r>e.max,loadable:loadable(s,e).some(v=>Math.abs(v-stored.weight)<.001),settled};
 }
 function rest(s,e){return e.rest===null||e.rest===undefined?s.settings.rest:e.rest;}
 function makeEntries(s,selected){
@@ -415,9 +436,11 @@ function defer(s,id){
   return true;
 }
 /* The user declined the proposal. The target stays exactly as it is. Rejection is stored
-   on the record and only reopened by a different completed performance. */
+   on the record and only reopened by a different completed performance. Like accept() and
+   defer(), rejection decides an OUTSTANDING proposal only: a record that is already
+   accepted or rejected is left untouched (a stale or repeated call cannot rewrite it). */
 function reject(s,id){
-  const sug=findSuggestion(s,id);if(!sug||sug.decision==='rejected')return false;
+  const sug=findSuggestion(s,id);if(!sug||!outstanding(sug))return false;
   const t=target(s,ex(s,id));
   sug.decision='rejected';sug.accepted=false;sug.rejectedAt=Date.now();sug.decidedAt=Date.now();
   sug.targetSnapshot={weight:t.weight,reps:t.reps};
@@ -525,7 +548,7 @@ function validate(s){
       if(q.accepted!==(q.decision==='accepted'))fail('progression decision flag');
       if(q.sourceSessionId!==null&&q.sourceSessionId!==undefined&&(typeof q.sourceSessionId!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(q.sourceSessionId)))fail('progression source');
       if(q.signature!==undefined&&typeof q.signature!=='string')fail('progression signature');
-      for(const f of ['createdAt','decidedAt','deferredAt','rejectedAt'])if(q[f]!==null&&q[f]!==undefined&&!finite(q[f],0,1e14))fail('progression timestamps');
+      for(const f of ['createdAt','decidedAt','deferredAt','rejectedAt','manualOverrideAt'])if(q[f]!==null&&q[f]!==undefined&&!finite(q[f],0,1e14))fail('progression timestamps');
     }
   }
   const cfg=s.settings;
