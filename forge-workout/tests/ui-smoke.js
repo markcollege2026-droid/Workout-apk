@@ -224,8 +224,7 @@ const path=require('node:path');
   expect(await featurePage.evaluate(()=>document.querySelector('#modal-title')?document.querySelector('#modal-title').textContent:'')).not.toContain('Before you train');
   // A restart is a new session: the deferred item returns, the rejected one stays quiet.
   await featurePage.reload();
-  await expect(featurePage.locator('h1')).toContainText('streamlined');
-  await featurePage.locator('[data-action="nav"][data-route="today"]:visible').first().click();
+  await expect(featurePage.locator('h1')).toContainText('Make today count');
   await featurePage.locator('[data-action="plan-workout"]').click();
   await expect(featurePage.locator('#modal-title')).toContainText('Before you train');
   const resurfaces=await featurePage.evaluate(()=>ForgeEngine.outstandingSuggestions(ForgeApp.s()).map(q=>q.decision));
