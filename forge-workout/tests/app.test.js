@@ -180,7 +180,7 @@ test('a target edited during an active workout reaches the remaining queue',asyn
 test('accepting a suggestion and manually overriding it are stored differently',async()=>{
   const app=boot();const {w,A}=app;
   try{
-    A.s().suggestions['bench-press']={sessionId:'x',exerciseId:'bench-press',weight:102.5,reps:6,kind:'raise',accepted:false,reason:'Every set reached the top.'};
+    A.s().suggestions['bench-press']={sessionId:'x',sourceSessionId:'x',exerciseId:'bench-press',weight:102.5,reps:6,kind:'raise',accepted:false,decision:'pending',reason:'Every set reached the top.'};
     A.navigate('progress');A.actions['accept-suggestion']({id:'bench-press'});
     assert.equal(A.s().targets['bench-press'].weight,102.5);
     assert.equal(A.s().targets['bench-press'].manual,false,'accepted proposals stay automatic');
@@ -433,7 +433,7 @@ test('a storage read failure keeps the unreadable state instead of overwriting i
     assert(A.Store.error,'the load error is reported');
     assert.match(w.document.getElementById('modal-title').textContent,/needs attention/);
     assert.equal(w.localStorage.getItem('forge.workout.v1'),'{"version":999}','the unreadable state is untouched');
-    assert.equal(A.s().version,1,'the app still starts with a fresh in-memory workspace');
+    assert.equal(A.s().version,2,'the app still starts with a fresh in-memory workspace');
   }finally{shut(app);}
 });
 

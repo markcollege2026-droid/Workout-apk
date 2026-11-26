@@ -134,30 +134,48 @@ test('rebuilding a workout plan after an override keeps the exact target everywh
   }
 });
 
-test('editing a suggestion saves the entered values instead of the proposal',()=>{
+test('editing a suggestion saves the entered values and settles the proposal as rejected',()=>{
   const s=state(),e=get(s,'bench-press');
-  s.suggestions[e.id]={sessionId:'x',exerciseId:e.id,weight:102.5,reps:6,kind:'raise',accepted:false,reason:'test'};
+  const at=Date.now()-1000;
+  const en={id:E.uid(),exerciseId:e.id,sourceId:e.id,pairGroup:e.group,sets:3,targetWeight:100,targetReps:10,manualTarget:false,skipped:false};
+  const sess={id:'perf-1',startedAt:at,endedAt:at+500,durationSeconds:1,blocks:['chest'],entries:[en],records:[],queue:[],timer:null,pendingLogId:null,note:'',estimateSeconds:1,straightSeconds:2,exerciseSnapshot:{}};
+  for(let i=0;i<3;i++)sess.records.push({id:E.uid(),entryId:en.id,exerciseId:e.id,setIndex:i+1,min:6,max:10,weight:100,reps:10,warmup:false,confirmed:true,rir:null,note:'',failed:false,bodyweight:null});
+  s.sessions.push(sess);
+  E.recordSuggestions(s,sess);
+  assert(s.suggestions[e.id],'the completed performance produced a recommendation');
   const result=E.setTarget(s,e,101,9);          // deliberately neither the suggestion nor loadable
   assert.equal(result.ok,true);
+  assert.equal(result.settled,true);
   assert.equal(E.target(s,e).weight,101);
   assert.equal(E.target(s,e).reps,9);
-  assert.equal(s.suggestions[e.id],undefined,'an explicit edit supersedes the pending proposal');
+  const record=s.suggestions[e.id];
+  assert(record,'the decision is persisted on the record, not discarded');
+  assert.equal(record.decision,'rejected');
+  assert.equal(record.accepted,false);
+  assert.equal(record.sourceSessionId,'perf-1');
+  // Recalculation from the same performance preserves the rejection.
+  E.recomputeSuggestions(s);
+  assert.equal(s.suggestions[e.id].decision,'rejected');
+  assert.equal(E.target(s,e).weight,101,'the manual target is untouched by the decision');
 });
 
 test('accepting a suggestion stays automatic while a manual edit is marked manual',()=>{
   const s=state(),e=get(s,'bench-press');
-  s.suggestions[e.id]={sessionId:'x',exerciseId:e.id,weight:102.5,reps:6,kind:'raise',accepted:false,reason:'test'};
+  s.suggestions[e.id]={sessionId:'x',exerciseId:e.id,weight:102.5,reps:6,kind:'raise',accepted:false,decision:'pending',reason:'test'};
   assert.equal(E.accept(s,e.id),true);
   assert.equal(E.target(s,e).manual,false);
   assert.equal(E.isManual(s,e.id),false);
   assert.equal(s.targets[e.id].weight,102.5);
+  assert.equal(s.suggestions[e.id].decision,'accepted');
+  assert.equal(s.suggestions[e.id].accepted,true);
   // Accepting an automatic target still rounds to the equipment list.
   const d=get(s,'hammer-curls');
-  s.suggestions[d.id]={sessionId:'x',exerciseId:d.id,weight:27.5,reps:8,kind:'raise',accepted:false,reason:'test'};
+  s.suggestions[d.id]={sessionId:'x',exerciseId:d.id,weight:27.5,reps:8,kind:'raise',accepted:false,decision:'pending',reason:'test'};
   E.accept(s,d.id);
   assert.equal(E.target(s,d).weight,28,'automatic targets keep rounding');
   E.setTarget(s,d,27.5,8);
   assert.equal(E.target(s,d).weight,27.5,'an explicit edit of the same value is kept');
+  assert.equal(s.suggestions[d.id].decision,'rejected','an explicit edit settles the accepted proposal as rejected');
 });
 
 test('changing the equipment list keeps manual overrides and re-rounds automatic ones',()=>{

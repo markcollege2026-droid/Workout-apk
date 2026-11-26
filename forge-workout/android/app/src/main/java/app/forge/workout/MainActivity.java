@@ -115,8 +115,9 @@ public class MainActivity extends Activity {
             db.execSQL("CREATE TABLE workspace (id INTEGER PRIMARY KEY, state TEXT NOT NULL, modified INTEGER NOT NULL)");
         }
         @Override public void onUpgrade(SQLiteDatabase db,int oldV,int newV){
-            // Schema v1 is the only version so far. Keep the stored workspace on upgrade
-            // instead of failing; add explicit per-version migrations here when the schema changes.
+            // The SQLite table shape has not changed; only the workspace JSON schema has
+            // (v2 adds recommendation decisions, migrated in the WebView). Keep the stored
+            // workspace on upgrade instead of failing.
             if(oldV<1)onCreate(db);
         }
         synchronized String load(){
@@ -153,10 +154,17 @@ public class MainActivity extends Activity {
             finally{sql.endTransaction();}
         }
     }
+    /** Workspace schema versions this build can persist: 1 (legacy) and 2 (recommendation decisions). */
+    private static final int MIN_STATE_VERSION=1, MAX_STATE_VERSION=2;
+    private static boolean supportedState(JSONObject state){
+        int version=state.optInt("version");
+        return version>=MIN_STATE_VERSION&&version<=MAX_STATE_VERSION;
+    }
     public final class Bridge {
         @JavascriptInterface public String loadState(){try{return db.load();}catch(Exception e){return "{\"storageError\":true}";}}
         @JavascriptInterface public String saveState(String json){
-            try {JSONObject check=new JSONObject(json);if(check.optInt("version")!=1)return "Unsupported state";db.save(json);return "ok";}
+            // Legacy version 1 workspaces are still stored as-is; the WebView migrates them.
+            try {JSONObject check=new JSONObject(json);if(!supportedState(check))return "Unsupported state";db.save(json);return "ok";}
             catch(Exception e){Log.e("Forge","SQLite save",e);return "SQLite error: "+e.getMessage();}
         }
         private boolean screenAwake;
@@ -198,7 +206,7 @@ public class MainActivity extends Activity {
         @JavascriptInterface public String restorePrevious(String json){
             try{
                 JSONObject check=new JSONObject(json);
-                if(check.optInt("version")!=1)return "Unsupported state";
+                if(!supportedState(check))return "Unsupported state";
                 if(!db.restorePrevious(json))return "The previous workspace could not be restored.";
                 return "ok";
             }catch(Exception e){Log.e("Forge","Restore previous",e);return "Restore failed: "+e.getMessage();}

@@ -31,7 +31,7 @@ const paths={
   shoulders:'M5 19v-8l-2-3 4-4h3m4 0h3l4 4-2 3v8M8 4l4 5 4-5M8 12h8m-4-3v10',
   grip:'M5 13V8a2 2 0 0 1 4 0v6-9a2 2 0 0 1 4 0v9-7a2 2 0 0 1 4 0v7-4a2 2 0 0 1 4 0v7c0 4-4 6-8 6-5 0-7-2-9-5l-2-4a2 2 0 0 1 3-2l3 3'
 };
-const A={E,Store,Seed,pages:{},ui:{route:Store.state.session?'session':'today',planned:null,libraryBlock:'all',search:'',showSubs:false,showArchived:false,progressExercise:'bench-press',chartMode:'weight',previewBlock:'all',calendar:new Date(),historyDate:null,modal:null,lastCommitted:null},s:()=>Store.state};
+const A={E,Store,Seed,pages:{},ui:{route:Store.state.session?'session':'today',planned:null,libraryBlock:'all',search:'',showSubs:false,showArchived:false,progressExercise:'bench-press',chartMode:'weight',previewBlock:'all',calendar:new Date(),historyDate:null,modal:null,lastCommitted:null,reviewed:false},s:()=>Store.state};
 A.escape=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 A.icon=(name,cls='')=>`<svg class="icon ${cls}" viewBox="0 0 24 24" aria-hidden="true"><path d="${paths[name]||paths.workout}"/></svg>`;
 A.kg=v=>v===null||v===undefined?'—':Number(v).toLocaleString(undefined,{maximumFractionDigits:2});

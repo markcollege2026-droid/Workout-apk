@@ -72,6 +72,97 @@ function target(s,e){
     loadable:loadable(s,e).some(v=>Math.abs(v-weight)<.001)};
 }
 function isManual(s,id){return s.targets[id]?.manual===true;}
+/* ---- Progression recommendations: one persisted record per exercise ----
+   Every record is tied to the completed performance that generated it
+   (sourceSessionId) plus a signature of the proposal. Decisions are stored on the
+   record, never inferred from target state:
+     pending   — never decided; outstanding
+     deferred  — the user postponed it; still outstanding (resurfaces before the next workout)
+     accepted  — the target was applied at decisionAt; the same proposal is never asked again
+     rejected  — the target stayed unchanged; that proposal stays suppressed until a
+                 NEW qualifying completed performance (a different sourceSessionId)
+   `accepted:false` is only a compatibility mirror for unknown/legacy readers and never
+   distinguishes pending from rejected. */
+const DECISIONS=['pending','accepted','rejected','deferred'];
+function suggestionSignature(q,id){return [id,q.kind,rounded(q.weight),Math.round(q.reps),q.sourceSessionId].join('|');}
+function decided(q){return q.decision==='accepted'||q.decision==='rejected';}
+function outstanding(q){return q.decision==='pending'||q.decision==='deferred';}
+/* A proposal that was decided is only reopened by a different completed performance. */
+function staleDecision(prev,q){return !!prev&&decided(prev)&&prev.sourceSessionId!==q.sourceSessionId;}
+function normalizeSuggestion(q){return {...q,decision:DECISIONS.includes(q.decision)?q.decision:(q.accepted===true?'accepted':'pending'),decidedAt:Number.isFinite(q.decidedAt)?q.decidedAt:null};}
+function adoptDecision(prev,q,now=Date.now()){
+  if(!prev)return q;
+  const same=prev.signature===q.signature||(prev.sourceSessionId===q.sourceSessionId&&prev.kind===q.kind&&prev.weight===q.weight&&prev.reps===q.reps);
+  if(!same)return q; // a materially different proposal is a new decision
+  const out={...q,decision:prev.decision,decidedAt:prev.decidedAt??null};
+  if(prev.decision==='deferred')out.deferredAt=now;
+  return out;
+}
+/* One record per exercise, and only for a completed performance: an exercise that was
+   skipped, substituted away, left without confirmed working sets, or deleted never
+   replaces or retires the record of the session that really did produce it. */
+function recordSuggestions(s,session,now=Date.now()){
+  const stored=s.suggestions||(s.suggestions={});
+  for(const en of session.entries){
+    const e=ex(s,en.exerciseId);if(!e||en.skipped)continue;
+    const sug=suggestion(s,e,session);if(!sug)continue;
+    const q=normalizeSuggestion({...sug,sourceSessionId:session.id,createdAt:now});
+    q.signature=suggestionSignature(q,e.id);
+    stored[e.id]=adoptDecision(stored[e.id],q,now);
+  }
+  retireSuggestions(s);
+}
+/* Retire records whose exercise no longer exists, or whose generating performance is no
+   longer a complete performance — e.g. after history editing lowered its sets. Decisions
+   that still describe the latest complete performance are always kept. */
+function retireSuggestions(s){
+  const stored=s.suggestions;if(!stored)return;
+  for(const [id,q] of Object.entries(stored)){
+    const e=ex(s,id);
+    if(!e){delete stored[id];continue;}
+    if(!sourceIsCurrent(s,e,q))delete stored[id];
+  }
+}
+function sourceIsCurrent(s,e,q){
+  const session=s.sessions.find(x=>x.id===q.sourceSessionId);if(!session)return false;
+  const history=exerciseHistory(s,e.id);
+  if(!history.length)return false;
+  return history[history.length-1].session.id===session.id;
+}
+/* Recalculation must never erase a decision: a decision made for the same performance
+   and the same proposal is recognised by content, not by object identity. */
+function recomputeSuggestions(s,now=Date.now()){
+  const stored=s.suggestions||(s.suggestions={});
+  const seen=new Set();
+  // A record whose source performance is no longer in the history cannot be verified; it
+  // is retired before recalculation so a later qualifying performance starts cleanly.
+  // Records for exercises with a live source are never removed here, even without history.
+  for(const [id,q] of Object.entries(stored)){
+    if(q.notQualifying)continue;
+    if(!s.sessions.some(x=>x.id===q.sourceSessionId))delete stored[id];
+  }
+  for(const e of s.exercises){
+    const last=exerciseHistory(s,e.id).pop();
+    if(!last){continue;}
+    seen.add(e.id);
+    const sug=suggestion(s,e,last.session);if(!sug)continue;
+    const q=normalizeSuggestion({...sug,sourceSessionId:last.session.id,createdAt:now});
+    q.signature=suggestionSignature(q,e.id);
+    const prev=stored[e.id];
+    if(!prev||prev.signature!==q.signature){
+      if(!prev||!sourceIsCurrent(s,e,prev)||staleDecision(prev,q))stored[e.id]=q;
+      else stored[e.id]=adoptDecision(prev,q,now);
+    }
+  }
+  for(const id of Object.keys(stored))if(!seen.has(id))delete stored[id];
+  retireSuggestions(s);
+  return stored;
+}
+function outstandingSuggestions(s){return Object.values(s.suggestions||{}).filter(outstanding);}
+function findSuggestion(s,id,signature=null){
+  const q=s.suggestions?.[id];if(!q)return null;
+  return signature&&q.signature!==signature?null:q;
+}
 // Explicit user-entered target. Validates absolute limits and keeps the entered values.
 function setTarget(s,e,weight,reps){
   const w=Number(weight),r=Number(reps);
@@ -82,9 +173,16 @@ function setTarget(s,e,weight,reps){
   if(r<LIMITS.reps.min||r>LIMITS.reps.max)return {error:'Target '+unit+' must be between '+LIMITS.reps.min+' and '+LIMITS.reps.max+'.'};
   const stored={weight:rounded(w),reps:r,manual:true,overriddenAt:Date.now()};
   s.targets[e.id]=stored;
-  // The explicit choice supersedes any pending automatic proposal for this exercise.
-  if(s.suggestions[e.id])delete s.suggestions[e.id];
-  return {ok:true,target:{...stored},outsideRange:r<e.min||r>e.max,loadable:loadable(s,e).some(v=>Math.abs(v-stored.weight)<.001)};
+  // An explicit choice settles the proposal as rejected: the decision is persisted instead
+  // of merely deleting the card, so recalculation cannot re-ask it. The record stays until
+  // a new qualifying performance generates a new proposal.
+  const outstandingRecord=s.suggestions?.[e.id];
+  if(outstandingRecord&&outstandingRecord.decision!=='rejected'){
+    outstandingRecord.decision='rejected';outstandingRecord.decidedAt=Date.now();outstandingRecord.accepted=false;
+    outstandingRecord.targetSnapshot={weight:stored.weight,reps:stored.reps};
+    outstandingRecord.decisionNote='manual target kept';
+  }
+  return {ok:true,target:{...stored},outsideRange:r<e.min||r>e.max,loadable:loadable(s,e).some(v=>Math.abs(v-stored.weight)<.001),settled:!!outstandingRecord};
 }
 function rest(s,e){return e.rest===null||e.rest===undefined?s.settings.rest:e.rest;}
 function makeEntries(s,selected){
@@ -297,14 +395,43 @@ function finishSession(s){
   session.records.forEach(r=>{delete r.task;});
   session.exerciseSnapshot=Object.fromEntries(session.entries.map(en=>[en.exerciseId,session.exerciseSnapshot[en.exerciseId]]));
   s.sessions.push(clone(session));
-  for(const en of session.entries){const e=ex(s,en.exerciseId);const sug=e&&suggestion(s,e,session);if(sug)s.suggestions[e.id]=sug;}
+  // One record per exercise, tied to this performance, never overwriting a decision for
+  // an existing proposal or an exercise that has no completed work in this session.
+  recordSuggestions(s,session,Date.now());
   s.session=null;return session;
 }
 function accept(s,id,weight=null,reps=null){
-  const sug=s.suggestions[id];if(!sug)return false;
   // Accepting a proposal is an automatic-origin target, not a manual override: it keeps
   // normal rounding/clamping behaviour. Only an explicit edit is marked manual.
-  s.targets[id]={weight:weight===null?sug.weight:weight,reps:reps===null?sug.reps:reps,manual:false};sug.accepted=true;return true;
+  const sug=findSuggestion(s,id);if(!sug||!outstanding(sug))return false;
+  s.targets[id]={weight:weight===null?sug.weight:weight,reps:reps===null?sug.reps:reps,manual:false};
+  sug.decision='accepted';sug.accepted=true;sug.decidedAt=Date.now();
+  sug.targetSnapshot={weight:s.targets[id].weight,reps:s.targets[id].reps};
+  delete sug.deferredAt;
+  return true;
+}
+/* The user postponed the proposal. It stays outstanding and keeps its identity, so it is
+   never regenerated as a "new" prompt; it simply resurfaces before the next workout. */
+function defer(s,id){
+  const sug=findSuggestion(s,id);if(!sug||!outstanding(sug))return false;
+  sug.decision='deferred';sug.accepted=false;sug.deferredAt=Date.now();sug.decidedAt=null;
+  return true;
+}
+/* The user declined the proposal. The target stays exactly as it is. Rejection is stored
+   on the record and only reopened by a different completed performance. */
+function reject(s,id){
+  const sug=findSuggestion(s,id);if(!sug||sug.decision==='rejected')return false;
+  const t=target(s,ex(s,id));
+  sug.decision='rejected';sug.accepted=false;sug.rejectedAt=Date.now();sug.decidedAt=Date.now();
+  sug.targetSnapshot={weight:t.weight,reps:t.reps};
+  delete sug.deferredAt;
+  return true;
+}
+/* Undo a deferral so the proposal is outstanding again without a new decision prompt. */
+function reopenDeferred(s,id){
+  const sug=findSuggestion(s,id);if(!sug||sug.decision!=='deferred')return false;
+  sug.decision='pending';sug.accepted=false;delete sug.deferredAt;sug.decidedAt=null;
+  return true;
 }
 function substitute(s,entryId){
   const sess=s.session,en=sess?.entries.find(x=>x.id===entryId);if(!en)return {error:'No exercise to replace.'};
@@ -355,9 +482,30 @@ function streak(s){
   let d=new Date();d.setHours(12,0,0,0);if(!days.has(localDate(d)))d.setDate(d.getDate()-1);
   let count=0;while(days.has(localDate(d))){count++;d.setDate(d.getDate()-1);}return count;
 }
+/* Schema: version 2 adds persistent recommendation decisions (decision, sourceSessionId,
+   signature, timestamps). Version 1 backups are migrated in place, never rejected:
+   an old accepted:true becomes accepted; accepted:false becomes pending (unreviewed),
+   never rejected. Decisions and source session IDs survive the round trip. */
+function migrate(s,now=Date.now()){
+  if(!s||typeof s!=='object')return s;
+  const stored=s.suggestions;
+  if(stored&&!Array.isArray(stored))for(const [id,q] of Object.entries(stored)){
+    if(!q||typeof q!=='object')continue;
+    const normalized=normalizeSuggestion(q);
+    if(q.decision&&DECISIONS.includes(q.decision))normalized.decision=q.decision;
+    else normalized.decision=q.accepted===true?'accepted':'pending';
+    if(typeof normalized.sourceSessionId!=='string'){
+      // Version 1 records carry the generating session in sessionId.
+      normalized.sourceSessionId=typeof q.sessionId==='string'?q.sessionId:null;
+    }
+    if(!normalized.acceptedAt)normalized.acceptedAt=normalized.decision==='accepted'?normalized.decidedAt??null:null;
+    stored[id]=normalized;
+  }
+  s.version=2;return s;
+}
 function validate(s){
   const fail=msg=>{throw new Error('Invalid backup: '+msg);};
-  if(!s||s.version!==1)fail('unsupported version');
+  if(!s||(s.version!==1&&s.version!==2))fail('unsupported version');
   if(!Array.isArray(s.exercises)||s.exercises.length<1||s.exercises.length>1000)fail('exercise list');
   const ids=new Set();
   const finite=(n,lo,hi)=>typeof n==='number'&&Number.isFinite(n)&&n>=lo&&n<=hi;
@@ -379,7 +527,16 @@ function validate(s){
     if(t.overriddenAt!==undefined&&!finite(t.overriddenAt,0,1e14))fail('targets');
   }
   for(const [k,v] of Object.entries(s.pairOverrides)){const pair=k.split('|');if(pair.length!==2||pair.some(id=>!ids.has(id))||typeof v!=='boolean')fail('pairing override');}
-  for(const [id,q] of Object.entries(s.suggestions))if(!ids.has(id)||!q||q.exerciseId!==id||!['hold','raise','reps','time','deload','variation'].includes(q.kind)||!finite(q.weight,0,1000)||!finite(q.reps,1,3600)||typeof q.reason!=='string'||typeof q.accepted!=='boolean')fail('progression suggestion');
+  for(const [id,q] of Object.entries(s.suggestions)){
+    if(!ids.has(id)||!q||q.exerciseId!==id||!['hold','raise','reps','time','deload','variation'].includes(q.kind)||!finite(q.weight,0,1000)||!finite(q.reps,1,3600)||typeof q.reason!=='string'||typeof q.accepted!=='boolean')fail('progression suggestion');
+    if(s.version===2){
+      if(!DECISIONS.includes(q.decision))fail('progression decision');
+      if(q.accepted!==(q.decision==='accepted'))fail('progression decision flag');
+      if(q.sourceSessionId!==null&&q.sourceSessionId!==undefined&&(typeof q.sourceSessionId!=='string'||!/^[a-zA-Z0-9_-]{1,100}$/.test(q.sourceSessionId)))fail('progression source');
+      if(q.signature!==undefined&&typeof q.signature!=='string')fail('progression signature');
+      for(const f of ['createdAt','decidedAt','deferredAt','rejectedAt'])if(q[f]!==null&&q[f]!==undefined&&!finite(q[f],0,1e14))fail('progression timestamps');
+    }
+  }
   const cfg=s.settings;
   for(const f of ['keepAwake','sound','vibrate','warmups','triples','effort'])if(typeof cfg[f]!=='boolean')fail('training preferences');
   for(const field of ['dumbbells','cables','machines','addedLoads'])if(!Array.isArray(cfg[field])||!cfg[field].length||cfg[field].length>1000||cfg[field].some(x=>!finite(x,0,1000)))fail('equipment weights');
@@ -407,6 +564,7 @@ function validate(s){
   }
   return true;
 }
-const api={GROUPS,LIMITS,clone,uid,ex,key,canPair,loadable,roundWeight,target,isManual,setTarget,rest,makeEntries,planEntries,plan,newSession,bodyweight,completeSet,startWork,finishWork,cancelWork,undoSet,fullRecords,exerciseHistory,lastRecords,suggestion,finishSession,accept,substitute,skip,actualLoad,epley,stats,stalled,weeklyVolume,localDate,streak,validate};
+const api={GROUPS,LIMITS,clone,uid,ex,key,canPair,loadable,roundWeight,target,isManual,setTarget,rest,makeEntries,planEntries,plan,newSession,bodyweight,completeSet,startWork,finishWork,cancelWork,undoSet,fullRecords,exerciseHistory,lastRecords,suggestion,finishSession,accept,substitute,skip,actualLoad,epley,stats,stalled,weeklyVolume,localDate,streak,validate,migrate,
+  DECISIONS,suggestionSignature,outstanding,decided,normalizeSuggestion,recordSuggestions,retireSuggestions,recomputeSuggestions,outstandingSuggestions,findSuggestion,defer,reject,reopenDeferred};
 if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.ForgeEngine=api;
 })(typeof window!=='undefined'?window:globalThis);

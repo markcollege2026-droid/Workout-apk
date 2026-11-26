@@ -74,22 +74,14 @@ const confirmPending=()=>{
 const commitActual=()=>{
   const sess=A.s().session;if(!sess)return;
   confirmPending();if($('finish-note'))sess.note=$('finish-note').value.slice(0,5000);
-  A.cancelTimer();A.cancelWorkTimer();const done=E.finishSession(A.s());A.ui.lastCommitted=done.id;A.ui.planned=null;
+  A.cancelTimer();A.cancelWorkTimer();const done=E.finishSession(A.s());A.ui.lastCommitted=done.id;A.ui.planned=null;A.ui.reviewed=false;
   const first=done.records.find(r=>!r.warmup);if(first)A.ui.progressExercise=first.exerciseId;
   A.save();A.screenAwake();A.navigate('progress');A.toast('COMMITTED. Every set is saved.');
 };
-const recomputeSuggestions=()=>{
-  const s=A.s();for(const e of s.exercises){
-    const last=E.exerciseHistory(s,e.id).pop();
-    if(!last){delete s.suggestions[e.id];continue;}
-    const sug=E.suggestion(s,e,last.session);if(!sug)continue;
-    const prev=s.suggestions[e.id];
-    // An identical recompute of an already accepted proposal keeps the explicit acceptance;
-    // a changed proposal is a new decision and correctly returns for review.
-    if(prev&&prev.accepted&&prev.sessionId===sug.sessionId&&prev.kind===sug.kind&&prev.weight===sug.weight&&prev.reps===sug.reps)sug.accepted=true;
-    s.suggestions[e.id]=sug;
-  }
-};
+// Recalculation is the engine's job now: decisions survive history edits, progression
+// settings and equipment changes, and only a new qualifying performance reopens one.
+const recomputeSuggestions=()=>E.recomputeSuggestions(A.s());
+
 // A target edited during an active workout must reach the work still ahead, not only
 // the next plan. Never rebuilds the queue while a work countdown or unconfirmed log is open.
 const applyTargetToSession=(id,weight,reps,manual)=>{
@@ -102,7 +94,7 @@ const applyTargetToSession=(id,weight,reps,manual)=>{
 A.importData=text=>{
   try{
     if(text.length>64*1024*1024)throw new Error('Backup is larger than the 64 MB safety limit.');
-    const imported=JSON.parse(text);E.validate(imported);
+    const imported=JSON.parse(text);E.migrate(imported);E.validate(imported);
     A.dialog('restore','Restore this workspace?',`<p class="intro">This replaces <b>all current data</b>. Export a backup first if you want to keep it.</p><div class="summary-values"><div class="summary-line"><span>Exercises</span><strong>${imported.exercises.length}</strong></div><div class="summary-line"><span>Saved sessions</span><strong>${imported.sessions.length}</strong></div><div class="summary-line"><span>Body weight entries</span><strong>${imported.bodyweights.length}</strong></div><div class="summary-line"><span>Active workout</span><strong>${imported.session?'Yes · will resume':'No'}</strong></div></div><div class="notice">Restoring is all-or-nothing. Invalid or unsupported files are rejected without changing your data.</div>`,`<button class="btn ghost" data-action="close-modal">Cancel</button><button class="btn primary" data-action="restore-confirm">Restore all data ${I('upload','sm')}</button>`,{imported});
   }catch(e){A.toast('Restore rejected: '+e.message,7000);}
 };
@@ -110,6 +102,7 @@ A.importData=text=>{
 // current workspace is preserved as the new recovery copy first.
 A.restorePreviousWorkspace=text=>{
   const parsed=JSON.parse(text);
+  E.migrate(parsed);
   E.validate(parsed);
   A.captureLog();
   // Storage is swapped first: if it fails, nothing local has changed yet and the
@@ -141,7 +134,7 @@ const actions={
       A.toast('Previous workspace restored. The workspace you were using is kept as the new recovery copy.',7000);
     }catch(e){A.toast('Recovery failed: '+e.message+' Your current workspace is unchanged.',9000);}
   },
-  'close-modal':()=>A.close(),
+  'close-modal':()=>{if(A.ui.modal?.type==='review')A.ui.reviewed=true;A.close();},
   'preview-info':()=>A.previewInfo(),
   'help':()=>A.help(),
   'confirm-dialog':()=>{const data=A.ui.modal.data;A.close();if(data.action==='commit-actual')commitActual();else if(data.action==='discard-session-actual'){A.cancelTimer();A.cancelWorkTimer();A.s().session=null;A.ui.planned=null;A.save();A.screenAwake();A.navigate('today');A.toast('Session discarded. Saved history is unchanged.');}else if(data.action==='reset-pairs-actual'){A.s().pairOverrides={};A.save();A.openPairing(data.id);}else if(data.action==='archive-actual'){const e=E.ex(A.s(),data.id);e.active=false;A.save();A.refreshPlanned();A.render();A.toast('Archived. History and targets are preserved.');}},
@@ -150,9 +143,47 @@ const actions={
     if(A.s().session){A.navigate('session');return;}
     const p=E.plan(A.s(),A.s().settings.selectedBlocks,A.s().settings.budget);
     if(!p.entries.length){A.toast('Choose at least one muscle block.');return;}
+    // Outstanding recommendations are reviewed once before the first workout of the
+    // day. Only an outstanding (pending or deferred) record opens this; accepted and
+    // rejected proposals never prompt again.
+    if(!A.ui.reviewed&&E.outstandingSuggestions(A.s()).length){A.openReview();return;}
+    actions['continue-plan']();
+  },
+  'continue-plan':()=>{
+    if(A.s().session){A.navigate('session');return;}
+    const p=E.plan(A.s(),A.s().settings.selectedBlocks,A.s().settings.budget);
+    if(!p.entries.length){A.toast('Choose at least one muscle block.');return;}
     const unknown=p.entries.map(x=>x.exerciseId).filter(id=>A.s().targets[id].weight===null);
     if(unknown.length)A.openStarts(unknown);else A.buildPlan();
   },
+  'review-dismiss':()=>{A.ui.reviewed=true;A.close();A.render();},
+  'review-accept':d=>{
+    const s=A.s();
+    if(!E.accept(s,d.id)){A.toast('That recommendation changed. Reopen the review.',5000);A.openReview();return;}
+    const e=E.ex(s,d.id),t=E.target(s,e);
+    applyTargetToSession(d.id,t.weight,t.reps,t.manual===true);
+    A.save();A.refreshPlanned();A.openReview();
+    A.toast('Accepted: '+e.name+' → '+A.load(e,t.weight,t.reps),4000);
+  },
+  'review-reject':d=>{
+    const s=A.s(),e=E.ex(s,d.id),t=E.target(s,e);
+    if(!E.reject(s,d.id)){A.toast('That recommendation changed. Reopen the review.',5000);A.openReview();return;}
+    A.save();A.refreshPlanned();A.openReview();
+    A.toast('Set aside. '+e.name+' stays at '+A.load(e,t.weight,t.reps)+'.',4000);
+  },
+  'review-defer':d=>{
+    const s=A.s();
+    if(!E.defer(s,d.id)){A.toast('That recommendation changed. Reopen the review.',5000);A.openReview();return;}
+    A.save();A.openReview();
+    A.toast(E.ex(s,d.id).name+' deferred. It returns before your next workout.',4000);
+  },
+  'review-defer-all':()=>{
+    const s=A.s();let count=0;
+    for(const q of E.outstandingSuggestions(s))if(E.defer(s,q.exerciseId))count++;
+    A.save();A.openReview();
+    A.toast(count?count+' recommendation(s) deferred to your next workout.':'Nothing is outstanding.',4000);
+  },
+  'review-start':()=>{A.ui.reviewed=true;A.close();actions['continue-plan']();},
   'conservative-starts':()=>{document.querySelectorAll('.start-weight').forEach(input=>{const e=E.ex(A.s(),input.dataset.id);input.value=E.roundWeight(A.s(),e,e.suggested);});A.toast('Conservative suggestions filled. Review them before continuing.',5000);},
   'save-starts':()=>{
     const data=A.ui.modal.data,s=A.s();const values=[];
@@ -243,6 +274,19 @@ const actions={
     const e=E.ex(s,d.id),t=E.target(s,e);
     applyTargetToSession(d.id,t.weight,t.reps,t.manual===true);
     A.save();A.refreshPlanned();refreshActiveTimer();A.render();A.toast('Next target accepted: '+A.load(e,t.weight,t.reps),5000);
+  },
+  'reject-suggestion':d=>{
+    const s=A.s(),e=E.ex(s,d.id);
+    if(!E.reject(s,d.id)){A.toast('That recommendation is no longer available.',4000);return;}
+    const t=E.target(s,e);
+    A.save();A.refreshPlanned();A.render();
+    A.toast('Set aside. '+e.name+' stays at '+A.load(e,t.weight,t.reps)+'. It returns after your next qualifying session.',5500);
+  },
+  'defer-suggestion':d=>{
+    const s=A.s(),e=E.ex(s,d.id);
+    if(!E.defer(s,d.id)){A.toast('That recommendation is no longer available.',4000);return;}
+    A.save();A.render();
+    A.toast(e.name+' deferred. It returns before your next workout.',5000);
   },
   'chart-mode':d=>{A.ui.chartMode=d.value;A.render();},
   'analyze':d=>{A.ui.progressExercise=d.id;A.navigate('progress');},

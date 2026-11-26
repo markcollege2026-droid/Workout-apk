@@ -7,6 +7,26 @@ A.openStarts=(ids,purpose='plan',entryId=null)=>{
   const s=A.s();ids=[...new Set(ids)];
   A.dialog('starts','Find your starting point.',`<p class="intro">Enter a comfortable working load for each exercise. Unknown? Use conservative starts, then check them against your ability and equipment. Dumbbells are kg <b>per hand</b>; barbells include the bar.</p><button class="btn ghost full" data-action="conservative-starts">Unknown · suggest conservative starts ${I('bolt','sm')}</button><div style="margin-top:12px">${ids.map(id=>{const e=E.ex(s,id),t=E.target(s,e);return `<div class="setup-row"><div><strong>${h(e.name)}</strong><small>${h(e.equipment)} · ${e.min}–${e.max} ${e.type==='timed'?'sec':'reps'}</small></div><div class="input-unit"><input class="start-weight" data-id="${id}" type="number" min="0" max="1000" step=".25" inputmode="decimal" placeholder="?" value="${s.targets[id].weight??''}" aria-label="${h(e.name)} starting weight"><span>kg</span></div></div>`;}).join('')}</div><p class="form-hint">Starting loads you type are saved exactly as entered. “Suggest conservative starts” fills loads that already round to your equipment. You can change them at any time. An empty bar may be the lightest available warm-up.</p>`,close+'<button class="btn primary" data-action="save-starts">Save starting weights '+I('arrow','sm')+'</button>',{ids,purpose,entryId});
 };
+
+// One shared recommendation row. The decision lives on the stored record, so a rerender
+// shows the same outstanding item instead of creating a new prompt.
+const decisionBadge=q=>q.decision==='deferred'?'<span class="badge yellow">DEFERRED</span>':'<span class="badge orange">PENDING</span>';
+const kindBadge=x=>`<span class="badge ${x.kind==='deload'?'yellow':x.kind==='raise'?'green':'purple'}">${({raise:'RAISE',reps:'MORE REPS',time:'MORE TIME',hold:'HOLD',deload:'DELOAD',variation:'LOAD / VARIATION'})[x.kind]}</span>`;
+A.recommendationCard=(q,{review=false}={})=>{
+  const s=A.s(),e=E.ex(s,q.exerciseId);if(!e)return '';
+  const t=E.target(s,e);
+  const where=q.sourceSessionId?(()=>{const sess=s.sessions.find(x=>x.id===q.sourceSessionId);return sess?' · from '+A.date(sess.endedAt||sess.startedAt):'';})():'';
+  const actions=review
+    ? `<div class="flex gap-sm wrap"><button class="btn secondary sm" data-action="review-accept" data-id="${e.id}">${I('check','sm')}Accept</button><button class="btn ghost sm" data-action="review-reject" data-id="${e.id}">${I('skip','sm')}Reject</button><button class="btn ghost sm" data-action="review-defer" data-id="${e.id}">${I('clock','sm')}Defer</button><button class="icon-btn" data-action="suggestion-edit" data-id="${e.id}" aria-label="Edit ${h(e.name)} target">${I('edit','sm')}</button></div>`
+    : `<div class="flex gap-sm wrap"><button class="btn secondary sm" data-action="accept-suggestion" data-id="${e.id}">${I('check','sm')}Accept</button><button class="btn ghost sm" data-action="reject-suggestion" data-id="${e.id}">Reject</button><button class="btn ghost sm" data-action="defer-suggestion" data-id="${e.id}">Defer</button><button class="icon-btn" data-action="suggestion-edit" data-id="${e.id}" aria-label="Edit ${h(e.name)} target">${I('edit','sm')}</button></div>`;
+  return `<div class="suggestion-row"><div class="grow">${kindBadge(q)} ${decisionBadge(q)}<h4>${h(e.name)} → ${h(A.load(e,q.weight,q.reps))}</h4><p>${h(q.reason)}</p><p class="form-hint">Current target: ${h(A.load(e,t.weight,t.reps))}${t.manual?' · MANUAL':''}${where?h(where):''}</p></div>${actions}</div>`;
+};
+A.openReview=()=>{
+  const s=A.s(),list=E.outstandingSuggestions(s);
+  if(!list.length){A.close();A.toast('No recommendations to review. Your decisions are saved.',4000);return;}
+  const rows=list.map(q=>A.recommendationCard(q,{review:true})).join('');
+  A.dialog('review','Before you train.',`<p class="intro">${list.length} recommendation${list.length===1?'':'s'} from your last recorded session${list.length===1?'':'s'}. Accept to apply a new target, Reject to keep your current target, or Defer to decide later — nothing changes unless you accept. You can start without deciding.</p>${rows}`,`<button class="btn ghost" data-action="review-defer-all">Defer all</button><button class="btn ghost" data-action="review-dismiss">Close</button><button class="btn primary" data-action="review-start">Start workout ${I('arrow','sm')}</button>`,{},true);
+};
 A.openTarget=(id,suggestion=false)=>{
   const s=A.s(),e=E.ex(s,id),t=E.target(s,e),sug=s.suggestions[id];
   const weight=suggestion&&sug?sug.weight:t.weight,reps=suggestion&&sug?sug.reps:t.reps;

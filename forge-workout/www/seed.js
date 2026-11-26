@@ -74,7 +74,7 @@
     const targets = {};
     exercises.forEach(e => targets[e.id]={weight:e.equipment==='bodyweight'?0:null,reps:e.min});
     return {
-      version:1, createdAt:Date.now(), updatedAt:Date.now(), exercises, targets, suggestions:{},
+      version:2, createdAt:Date.now(), updatedAt:Date.now(), exercises, targets, suggestions:{},
       sessions:[], session:null, bodyweights:[], pairOverrides:{},
       settings:{
         rest:90, transition:10, warmupRest:45, keepAwake:true, sound:true, vibrate:true,

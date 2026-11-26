@@ -30,7 +30,9 @@ const path=require('node:path');
   await click('equipment');await page.locator('#equipment-dumbbells').fill('-1, 4');await click('save-equipment');await expect(page.locator('#toast')).toContainText('comma-separated');
   await page.locator('#equipment-dumbbells').fill('2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 34, 36, 38, 40');await click('save-equipment');check('Equipment validation rejects invalid loads without a partial save');
   await click('nav','[data-route="today"]');await click('bodyweight');await page.locator('#body-weight').fill('72.4');await click('save-bodyweight');expect(await page.evaluate(()=>ForgeApp.s().bodyweights[0].weight)).toBe(72.4);check('Bodyweight snapshot source is recorded locally');
-  await click('block-toggle','[data-id="back"]');await click('plan-workout');await expect(page.locator('#modal-title')).toContainText('starting point');await click('conservative-starts');await click('save-starts');
+  await click('block-toggle','[data-id="back"]');await click('plan-workout');
+  if(await page.locator('[data-action="review-start"]').count())await click('review-start');
+  await expect(page.locator('#modal-title')).toContainText('starting point');await click('conservative-starts');await click('save-starts');
   await expect(page.locator('h1')).toContainText('streamlined');expect(await page.evaluate(()=>ForgeApp.ui.planned.entries.length)).toBe(6);check('First-use starting-weight flow builds a complete plan');
   await page.screenshot({path:'tests/artifacts/desktop-plan.png',fullPage:true});await click('start-workout');
   await expect(page.locator('[data-action="set-done"]')).toBeEnabled();await click('set-done');await expect(page.locator('#timer-text')).toBeVisible();await expect(page.locator('#log-reps')).toHaveValue('8');
@@ -58,7 +60,28 @@ const path=require('node:path');
   const summary=await page.evaluate(()=>({history:ForgeApp.s().sessions.length,active:ForgeApp.s().session,original:ForgeApp.s().suggestions['bench-press'],subs:ForgeApp.s().suggestions['dumbbell-bench-press'],valid:ForgeEngine.validate(ForgeApp.s())}));
   expect(summary.history).toBe(1);expect(summary.active).toBe(null);expect(summary.original).toBeUndefined();expect(summary.subs).toBeTruthy();expect(summary.valid).toBe(true);check('Full session COMMIT generates independent suggestions, real charts and records');
   await noOverflow();await page.screenshot({path:'tests/artifacts/mobile-progress.png',fullPage:true});
-  if(await page.locator('[data-action="accept-suggestion"]').count())await click('accept-suggestion');check('One-tap acceptance applies the next target explicitly');
+  const decisionCounts=await page.evaluate(()=>({pending:ForgeEngine.outstandingSuggestions(ForgeApp.s()).length,targets:JSON.parse(JSON.stringify(ForgeApp.s().targets)),records:Object.fromEntries(Object.entries(ForgeApp.s().suggestions).map(([id,q])=>[id,q.decision]))}));
+  if(await page.locator('[data-action="accept-suggestion"]').count())await click('accept-suggestion');
+  const acceptedNow=await page.evaluate(()=>Object.values(ForgeApp.s().suggestions).filter(q=>q.decision==='accepted').length);
+  expect(acceptedNow).toBeGreaterThan(0);check('One-tap acceptance applies the next target explicitly');
+  if(await page.locator('[data-action="reject-suggestion"]').count()){
+    const before=await page.evaluate(()=>{const id=ForgeEngine.outstandingSuggestions(ForgeApp.s())[0].exerciseId;return {id,target:ForgeEngine.target(ForgeApp.s(),ForgeEngine.ex(ForgeApp.s(),id))};});
+    await click('reject-suggestion');
+    const after=await page.evaluate(id=>({decision:ForgeApp.s().suggestions[id].decision,target:ForgeEngine.target(ForgeApp.s(),ForgeEngine.ex(ForgeApp.s(),id))}),before.id);
+    expect(after.decision).toBe('rejected');
+    expect(after.target.weight).toBe(before.target.weight);expect(after.target.reps).toBe(before.target.reps);
+    check('Reject keeps the current target and stores the decision');
+  }
+  if(await page.locator('[data-action="defer-suggestion"]').count()){
+    const deferred=await page.evaluate(()=>{const q=ForgeEngine.outstandingSuggestions(ForgeApp.s())[0];if(!q)return null;const before=ForgeEngine.target(ForgeApp.s(),ForgeEngine.ex(ForgeApp.s(),q.exerciseId));return {id:q.exerciseId,weight:before.weight,reps:before.reps};});
+    if(deferred){
+      await click('defer-suggestion');
+      const after=await page.evaluate(id=>({decision:ForgeApp.s().suggestions[id].decision,target:ForgeEngine.target(ForgeApp.s(),ForgeEngine.ex(ForgeApp.s(),id))}),deferred.id);
+      expect(after.decision).toBe('deferred');
+      expect(after.target.weight).toBe(deferred.weight);expect(after.target.reps).toBe(deferred.reps);
+      check('Defer stores a distinct decision and never applies the target');
+    }
+  }
   const acceptedBefore=await page.evaluate(()=>Object.values(ForgeApp.s().suggestions).filter(x=>x.accepted).length);
   await click('nav','[data-route="history"]');await expect(page.locator('.history-row')).toHaveCount(1);await click('history-session');await click('history-edit');
   const originalStart=await page.locator('#history-date-edit').inputValue();
@@ -141,6 +164,50 @@ const path=require('node:path');
   expect(await featurePage.evaluate(()=>ForgeApp.s().session.records[0].reps)).toBe(Number(logged));
   check('A timed exercise counts down, can be cancelled, and an early hold logs its real seconds');
 
+  // Pre-workout recommendation review: decisions persist, a rerender creates no duplicate
+  // prompts, and the user can always start without accepting.
+  await featurePage.reload();
+  await featurePage.evaluate(()=>{
+    const s=ForgeApp.s(),E=ForgeEngine;
+    s.session=null;ForgeApp.ui.planned=null;ForgeApp.ui.reviewed=false;
+    s.settings.warmups=false;
+    for(const e of s.exercises)if(s.targets[e.id].weight===null)s.targets[e.id].weight=20;
+    const now=Date.now();
+    const make=(id,at)=>{
+      const e=E.ex(s,id);
+      const en={id:E.uid(),exerciseId:id,sourceId:id,pairGroup:e.group,sets:1,targetWeight:100,targetReps:e.max,manualTarget:false,skipped:false};
+      const sess={id:E.uid(),startedAt:at,endedAt:at+600000,durationSeconds:600,blocks:[e.block],entries:[en],
+        records:[{id:E.uid(),entryId:en.id,exerciseId:id,setIndex:1,min:e.min,max:e.max,weight:100,reps:e.max,warmup:false,confirmed:true,rir:null,note:'',failed:false,bodyweight:null}],
+        queue:[],timer:null,pendingLogId:null,note:'',estimateSeconds:600,straightSeconds:600,exerciseSnapshot:{[id]:E.clone(e)}};
+      s.sessions.push(sess);
+      E.recordSuggestions(s,sess,now);
+    };
+    make('bench-press',now-7200000);make('squats',now-3600000);
+    ForgeApp.save();ForgeApp.render();
+  });
+  await featurePage.locator('[data-action="nav"][data-route="today"]:visible').first().click();
+  await featurePage.locator('[data-action="plan-workout"]').click();
+  await expect(featurePage.locator('#modal-title')).toContainText('Before you train');
+  await expect(featurePage.locator('[data-action="review-start"]')).toBeVisible();
+  const reviewOutstanding=await featurePage.evaluate(()=>ForgeEngine.outstandingSuggestions(ForgeApp.s()).length);
+  expect(reviewOutstanding).toBe(2);
+  await featurePage.locator('[data-action="review-defer"]').first().click();
+  await featurePage.locator('[data-action="review-reject"]').first().click();
+  const reviewed=await featurePage.evaluate(()=>({outstanding:ForgeEngine.outstandingSuggestions(ForgeApp.s()).length,decisions:Object.values(ForgeApp.s().suggestions).map(q=>q.decision).sort()}));
+  expect(reviewed.outstanding).toBe(0);
+  expect(reviewed.decisions).toEqual(['rejected']);
+  expect(await featurePage.evaluate(()=>document.querySelector('#modal-root').innerHTML)).toBe('');
+  // With nothing outstanding the next plan starts with no prompt at all.
+  await featurePage.locator('[data-action="plan-workout"]').click();
+  expect(await featurePage.evaluate(()=>document.querySelector('#modal-root').innerHTML)).toBe('');
+  expect(await featurePage.evaluate(()=>!!ForgeApp.ui.planned)).toBe(true);
+  // Recalculation and rerender recreate no prompt for the rejected proposal.
+  await featurePage.evaluate(()=>{ForgeEngine.recomputeSuggestions(ForgeApp.s());ForgeApp.save();ForgeApp.ui.reviewed=false;ForgeApp.ui.planned=null;ForgeApp.render();});
+  await featurePage.locator('[data-action="plan-workout"]').click();
+  expect(await featurePage.evaluate(()=>ForgeEngine.outstandingSuggestions(ForgeApp.s()).length)).toBe(0);
+  expect(await featurePage.evaluate(()=>document.querySelector('#modal-root').innerHTML)).toBe('');
+  check('Pre-workout review accepts/rejects/defers without duplicates and never blocks starting');
+  await featurePage.reload();
   await featurePage.locator('[data-action="nav"][data-route="settings"]:visible').first().click();
   await featurePage.locator('[data-action="recover-previous"]').click();
   await expect(featurePage.locator('#modal-title')).toContainText('Restore the previous workspace');

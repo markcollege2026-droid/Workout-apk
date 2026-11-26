@@ -5,7 +5,13 @@ const store={native,error:null,state:null};
 const CURRENT='forge.workout.v1',PREVIOUS='forge.workout.v1.previous';
 try{
   const raw=native?root.Native.loadState():localStorage.getItem(CURRENT);
-  if(raw){const parsed=JSON.parse(raw);root.ForgeEngine.validate(parsed);store.state=parsed;}
+  if(raw){
+    const parsed=JSON.parse(raw);
+    // Version 1 workspaces are migrated in place (old accepted:true -> accepted,
+    // old accepted:false -> pending), so a restart never loses decisions or data.
+    if(parsed&&parsed.version===1)root.ForgeEngine.migrate(parsed);
+    root.ForgeEngine.validate(parsed);store.state=parsed;
+  }
 }catch(e){store.error=e.message;}
 if(!store.state)store.state=root.ForgeSeed.createState();
 // The browser preview keeps the same "previous workspace" recovery copy the APK keeps in

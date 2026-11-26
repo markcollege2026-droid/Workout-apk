@@ -4,7 +4,7 @@
   "scripts": {
     "start": "python3 -m http.server 3000 --bind 0.0.0.0 --directory www",
     "bundle": "node scripts/bundle-web.js",
-    "test": "node --test tests/engine.test.js tests/overrides.test.js tests/work-timer.test.js tests/app.test.js",
+    "test": "node --test tests/engine.test.js tests/overrides.test.js tests/work-timer.test.js tests/app.test.js tests/decisions.test.js",
     "test:ui": "node tests/ui-smoke.js",
     "build:apk": "bash scripts/build-apk.sh"
   },

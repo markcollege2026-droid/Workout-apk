@@ -9,7 +9,7 @@ A complete personal-use, offline Android workout app built from your workout spe
 
 ## Build on GitHub Actions
 
-The workflow is at the repository root: **`.github/workflows/forge-build-apk.yml`**. Source lives in **`forge-workout/`**. A push on any branch runs the workflow: 45 engine tests, the 27-check headless browser UI smoke suite, a guard that fails when the checked-in `www/forge.js` bundle drifted from the readable sources, then the APK build and verification. Download **Forge-Workout-APK** from a successful run and extract **Forge-Workout.apk**. Pushing a `v*` tag additionally publishes a **GitHub Release** with the signed APK, its SHA-256 checksum, and build details attached.
+The workflow is at the repository root: **`.github/workflows/forge-build-apk.yml`**. Source lives in **`forge-workout/`**. A push on any branch runs the workflow: 125 Node tests and the headless browser UI smoke suite (34 checks), a guard that fails when the checked-in `www/forge.js` bundle drifted from the readable sources, then the APK build and verification. Download **Forge-Workout-APK** from a successful run and extract **Forge-Workout.apk**. Pushing a `v*` tag additionally publishes a **GitHub Release** with the signed APK, its SHA-256 checksum, and build details attached.
 
 The matching APK signing key is restored from the **FORGE_WORKOUT_KEYSTORE_B64** Actions secret; it is not public source. Cloud compilation processes app code only, not your phone's workout data. See **GITHUB_ACTIONS.md** for this repository's build details.
 
@@ -41,9 +41,10 @@ Android **Force stop** disables alarms/services/reminders. It is not a normal ba
 - Tap **Plan my workout**. Enter comfortable starting loads or select **Unknown · suggest conservative starts** and review them.
 - Check the plan and estimated time. Heavy compounds come first; compatible exercises are paired using your table. Triples are optional and off initially.
 - Tap **Set done** at the instant you finish. The timer starts before the log. The log is target-prefilled; confirm while resting. In a superset, A starts a transition and B starts the full rest.
+- Outstanding recommendations are reviewed once before the first workout: **Before you train** lists pending and deferred items with Accept / Reject / Defer. You can start without deciding.
 - A **timed exercise** (Plank, Farmer Carries) shows its target duration and replaces **Set done** with **Start timer**. The app counts down, alerts you at zero with your sound/vibration settings, and opens the log prefilled with the seconds you actually held. **Finish early** logs the real duration (marked *ended early*); **Cancel timer** records no set. The rest timer then runs exactly as usual.
 - Use **Unavailable today** for the next unused substitute or **Skip today**. Substitute targets and history are independent. Original, skipped, and incomplete exercises are not penalized.
-- Use **COMMIT** to finish and save. In Progress, review **Raise? / To?**, then **Accept** or edit each proposal. Nothing silently raises your load.
+- Use **COMMIT** to finish and save. In Progress, review **Raise? / To?**, then **Accept**, **Reject** or **Defer** each proposal (or edit the target). Accept applies the new target; Reject keeps your current target and does not ask again until your next qualifying session on that lift; Defer leaves it outstanding for the pre-workout review. Nothing silently raises your load, and decisions survive recalculation, restarts and backups.
 
 Every set and draft log autosaves. Reopening goes straight into the same active session. Undo restores the most recent task. Discard requires confirmation and only removes the active session.
 
@@ -189,7 +190,7 @@ SQLite stores the complete versioned workspace document transactionally, plus on
 - Linux SDK 35 build completed; aapt2/d8 compilation succeeded.
 - APK alignment and v2/v3 signature verification passed.
 - APK manifest was inspected: **no Internet permission**, package `app.forge.workout`, minSdk 26, targetSdk 35, and **not debuggable** (release builds only; `scripts/build-apk.sh --debug` is the development build and is never shipped).
-- **101 Node tests passed**: 45 original engine tests plus 17 manual-override, 18 work-timer and 21 app-layer regressions (the app suite runs the real bundle in a jsdom window, including the native bridge contract).
+- **125 Node tests passed**: 45 original engine tests plus 17 manual-override, 18 work-timer, 21 app-layer and 24 recommendation-decision regressions (the app suites run the real bundle in a jsdom window, including the native bridge contract).
 - **31 browser UI checks passed**: complete session workflow, drafts and reload, notes, edit/archive, independent substitutes, history editing (including future-date rejection and accepted-suggestion preservation), real charts, export/restore, malformed-backup rejection, corrupt-storage recovery, 320px layouts, local-file assets, mocked native bridge contracts, unrounded manual targets across reloads, the timed-exercise hold countdown (cancel + early finish), and previous-workspace recovery.
 - **1 November 2026 pass** fixed manual target overrides being rounded/clamped/reverted, added a real timed-exercise work countdown on its own native timer channel, wired the keep-screen-awake setting to the native bridge, completed previous-workspace recovery, and made the personal-release APK non-debuggable. See the addendum in `tests/VERIFICATION.md`.
 - **25 October 2026 functional-QA pass** fixed three defects with new regression tests: accepted suggestions were silently un-accepted by history edits, undo could resurrect tasks of skipped/substituted entries, and history editing accepted future session dates. GitHub Actions now also runs the headless UI smoke suite and fails on `www/forge.js` bundle drift. See the addendum in `tests/VERIFICATION.md`.

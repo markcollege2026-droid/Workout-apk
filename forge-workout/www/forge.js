@@ -130,7 +130,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     const targets = {};
     exercises.forEach((e) => targets[e.id] = { weight: e.equipment === "bodyweight" ? 0 : null, reps: e.min });
     return {
-      version: 1,
+      version: 2,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       exercises,
@@ -249,7 +249,101 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     var _a;
     return ((_a = s.targets[id]) == null ? void 0 : _a.manual) === true;
   }
+  const DECISIONS = ["pending", "accepted", "rejected", "deferred"];
+  function suggestionSignature(q, id) {
+    return [id, q.kind, rounded(q.weight), Math.round(q.reps), q.sourceSessionId].join("|");
+  }
+  function decided(q) {
+    return q.decision === "accepted" || q.decision === "rejected";
+  }
+  function outstanding(q) {
+    return q.decision === "pending" || q.decision === "deferred";
+  }
+  function staleDecision(prev, q) {
+    return !!prev && decided(prev) && prev.sourceSessionId !== q.sourceSessionId;
+  }
+  function normalizeSuggestion(q) {
+    return __spreadProps(__spreadValues({}, q), { decision: DECISIONS.includes(q.decision) ? q.decision : q.accepted === true ? "accepted" : "pending", decidedAt: Number.isFinite(q.decidedAt) ? q.decidedAt : null });
+  }
+  function adoptDecision(prev, q, now = Date.now()) {
+    var _a;
+    if (!prev) return q;
+    const same = prev.signature === q.signature || prev.sourceSessionId === q.sourceSessionId && prev.kind === q.kind && prev.weight === q.weight && prev.reps === q.reps;
+    if (!same) return q;
+    const out = __spreadProps(__spreadValues({}, q), { decision: prev.decision, decidedAt: (_a = prev.decidedAt) != null ? _a : null });
+    if (prev.decision === "deferred") out.deferredAt = now;
+    return out;
+  }
+  function recordSuggestions(s, session, now = Date.now()) {
+    const stored = s.suggestions || (s.suggestions = {});
+    for (const en of session.entries) {
+      const e = ex(s, en.exerciseId);
+      if (!e || en.skipped) continue;
+      const sug = suggestion(s, e, session);
+      if (!sug) continue;
+      const q = normalizeSuggestion(__spreadProps(__spreadValues({}, sug), { sourceSessionId: session.id, createdAt: now }));
+      q.signature = suggestionSignature(q, e.id);
+      stored[e.id] = adoptDecision(stored[e.id], q, now);
+    }
+    retireSuggestions(s);
+  }
+  function retireSuggestions(s) {
+    const stored = s.suggestions;
+    if (!stored) return;
+    for (const [id, q] of Object.entries(stored)) {
+      const e = ex(s, id);
+      if (!e) {
+        delete stored[id];
+        continue;
+      }
+      if (!sourceIsCurrent(s, e, q)) delete stored[id];
+    }
+  }
+  function sourceIsCurrent(s, e, q) {
+    const session = s.sessions.find((x) => x.id === q.sourceSessionId);
+    if (!session) return false;
+    const history = exerciseHistory(s, e.id);
+    if (!history.length) return false;
+    return history[history.length - 1].session.id === session.id;
+  }
+  function recomputeSuggestions(s, now = Date.now()) {
+    const stored = s.suggestions || (s.suggestions = {});
+    const seen = /* @__PURE__ */ new Set();
+    for (const [id, q] of Object.entries(stored)) {
+      if (q.notQualifying) continue;
+      if (!s.sessions.some((x) => x.id === q.sourceSessionId)) delete stored[id];
+    }
+    for (const e of s.exercises) {
+      const last = exerciseHistory(s, e.id).pop();
+      if (!last) {
+        continue;
+      }
+      seen.add(e.id);
+      const sug = suggestion(s, e, last.session);
+      if (!sug) continue;
+      const q = normalizeSuggestion(__spreadProps(__spreadValues({}, sug), { sourceSessionId: last.session.id, createdAt: now }));
+      q.signature = suggestionSignature(q, e.id);
+      const prev = stored[e.id];
+      if (!prev || prev.signature !== q.signature) {
+        if (!prev || !sourceIsCurrent(s, e, prev) || staleDecision(prev, q)) stored[e.id] = q;
+        else stored[e.id] = adoptDecision(prev, q, now);
+      }
+    }
+    for (const id of Object.keys(stored)) if (!seen.has(id)) delete stored[id];
+    retireSuggestions(s);
+    return stored;
+  }
+  function outstandingSuggestions(s) {
+    return Object.values(s.suggestions || {}).filter(outstanding);
+  }
+  function findSuggestion(s, id, signature = null) {
+    var _a;
+    const q = (_a = s.suggestions) == null ? void 0 : _a[id];
+    if (!q) return null;
+    return signature && q.signature !== signature ? null : q;
+  }
   function setTarget(s, e, weight, reps) {
+    var _a;
     const w = Number(weight), r = Number(reps);
     const unit = e.type === "timed" ? "seconds" : "reps";
     if (!Number.isFinite(w) || weight === "" || weight === null) return { error: "Enter a weight between " + LIMITS.weight.min + " and " + LIMITS.weight.max + " kg." };
@@ -258,8 +352,15 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     if (r < LIMITS.reps.min || r > LIMITS.reps.max) return { error: "Target " + unit + " must be between " + LIMITS.reps.min + " and " + LIMITS.reps.max + "." };
     const stored = { weight: rounded(w), reps: r, manual: true, overriddenAt: Date.now() };
     s.targets[e.id] = stored;
-    if (s.suggestions[e.id]) delete s.suggestions[e.id];
-    return { ok: true, target: __spreadValues({}, stored), outsideRange: r < e.min || r > e.max, loadable: loadable(s, e).some((v) => Math.abs(v - stored.weight) < 1e-3) };
+    const outstandingRecord = (_a = s.suggestions) == null ? void 0 : _a[e.id];
+    if (outstandingRecord && outstandingRecord.decision !== "rejected") {
+      outstandingRecord.decision = "rejected";
+      outstandingRecord.decidedAt = Date.now();
+      outstandingRecord.accepted = false;
+      outstandingRecord.targetSnapshot = { weight: stored.weight, reps: stored.reps };
+      outstandingRecord.decisionNote = "manual target kept";
+    }
+    return { ok: true, target: __spreadValues({}, stored), outsideRange: r < e.min || r > e.max, loadable: loadable(s, e).some((v) => Math.abs(v - stored.weight) < 1e-3), settled: !!outstandingRecord };
   }
   function rest(s, e) {
     return e.rest === null || e.rest === void 0 ? s.settings.rest : e.rest;
@@ -585,19 +686,49 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     });
     session.exerciseSnapshot = Object.fromEntries(session.entries.map((en) => [en.exerciseId, session.exerciseSnapshot[en.exerciseId]]));
     s.sessions.push(clone(session));
-    for (const en of session.entries) {
-      const e = ex(s, en.exerciseId);
-      const sug = e && suggestion(s, e, session);
-      if (sug) s.suggestions[e.id] = sug;
-    }
+    recordSuggestions(s, session, Date.now());
     s.session = null;
     return session;
   }
   function accept(s, id, weight = null, reps = null) {
-    const sug = s.suggestions[id];
-    if (!sug) return false;
+    const sug = findSuggestion(s, id);
+    if (!sug || !outstanding(sug)) return false;
     s.targets[id] = { weight: weight === null ? sug.weight : weight, reps: reps === null ? sug.reps : reps, manual: false };
+    sug.decision = "accepted";
     sug.accepted = true;
+    sug.decidedAt = Date.now();
+    sug.targetSnapshot = { weight: s.targets[id].weight, reps: s.targets[id].reps };
+    delete sug.deferredAt;
+    return true;
+  }
+  function defer(s, id) {
+    const sug = findSuggestion(s, id);
+    if (!sug || !outstanding(sug)) return false;
+    sug.decision = "deferred";
+    sug.accepted = false;
+    sug.deferredAt = Date.now();
+    sug.decidedAt = null;
+    return true;
+  }
+  function reject(s, id) {
+    const sug = findSuggestion(s, id);
+    if (!sug || sug.decision === "rejected") return false;
+    const t = target(s, ex(s, id));
+    sug.decision = "rejected";
+    sug.accepted = false;
+    sug.rejectedAt = Date.now();
+    sug.decidedAt = Date.now();
+    sug.targetSnapshot = { weight: t.weight, reps: t.reps };
+    delete sug.deferredAt;
+    return true;
+  }
+  function reopenDeferred(s, id) {
+    const sug = findSuggestion(s, id);
+    if (!sug || sug.decision !== "deferred") return false;
+    sug.decision = "pending";
+    sug.accepted = false;
+    delete sug.deferredAt;
+    sug.decidedAt = null;
     return true;
   }
   function substitute(s, entryId) {
@@ -700,11 +831,29 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     }
     return count;
   }
+  function migrate(s, now = Date.now()) {
+    var _a;
+    if (!s || typeof s !== "object") return s;
+    const stored = s.suggestions;
+    if (stored && !Array.isArray(stored)) for (const [id, q] of Object.entries(stored)) {
+      if (!q || typeof q !== "object") continue;
+      const normalized = normalizeSuggestion(q);
+      if (q.decision && DECISIONS.includes(q.decision)) normalized.decision = q.decision;
+      else normalized.decision = q.accepted === true ? "accepted" : "pending";
+      if (typeof normalized.sourceSessionId !== "string") {
+        normalized.sourceSessionId = typeof q.sessionId === "string" ? q.sessionId : null;
+      }
+      if (!normalized.acceptedAt) normalized.acceptedAt = normalized.decision === "accepted" ? (_a = normalized.decidedAt) != null ? _a : null : null;
+      stored[id] = normalized;
+    }
+    s.version = 2;
+    return s;
+  }
   function validate(s) {
     const fail = (msg) => {
       throw new Error("Invalid backup: " + msg);
     };
-    if (!s || s.version !== 1) fail("unsupported version");
+    if (!s || s.version !== 1 && s.version !== 2) fail("unsupported version");
     if (!Array.isArray(s.exercises) || s.exercises.length < 1 || s.exercises.length > 1e3) fail("exercise list");
     const ids = /* @__PURE__ */ new Set();
     const finite = (n, lo, hi) => typeof n === "number" && Number.isFinite(n) && n >= lo && n <= hi;
@@ -729,7 +878,16 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       const pair = k.split("|");
       if (pair.length !== 2 || pair.some((id) => !ids.has(id)) || typeof v !== "boolean") fail("pairing override");
     }
-    for (const [id, q] of Object.entries(s.suggestions)) if (!ids.has(id) || !q || q.exerciseId !== id || !["hold", "raise", "reps", "time", "deload", "variation"].includes(q.kind) || !finite(q.weight, 0, 1e3) || !finite(q.reps, 1, 3600) || typeof q.reason !== "string" || typeof q.accepted !== "boolean") fail("progression suggestion");
+    for (const [id, q] of Object.entries(s.suggestions)) {
+      if (!ids.has(id) || !q || q.exerciseId !== id || !["hold", "raise", "reps", "time", "deload", "variation"].includes(q.kind) || !finite(q.weight, 0, 1e3) || !finite(q.reps, 1, 3600) || typeof q.reason !== "string" || typeof q.accepted !== "boolean") fail("progression suggestion");
+      if (s.version === 2) {
+        if (!DECISIONS.includes(q.decision)) fail("progression decision");
+        if (q.accepted !== (q.decision === "accepted")) fail("progression decision flag");
+        if (q.sourceSessionId !== null && q.sourceSessionId !== void 0 && (typeof q.sourceSessionId !== "string" || !/^[a-zA-Z0-9_-]{1,100}$/.test(q.sourceSessionId))) fail("progression source");
+        if (q.signature !== void 0 && typeof q.signature !== "string") fail("progression signature");
+        for (const f of ["createdAt", "decidedAt", "deferredAt", "rejectedAt"]) if (q[f] !== null && q[f] !== void 0 && !finite(q[f], 0, 1e14)) fail("progression timestamps");
+      }
+    }
     const cfg = s.settings;
     for (const f of ["keepAwake", "sound", "vibrate", "warmups", "triples", "effort"]) if (typeof cfg[f] !== "boolean") fail("training preferences");
     for (const field of ["dumbbells", "cables", "machines", "addedLoads"]) if (!Array.isArray(cfg[field]) || !cfg[field].length || cfg[field].length > 1e3 || cfg[field].some((x) => !finite(x, 0, 1e3))) fail("equipment weights");
@@ -757,7 +915,61 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     }
     return true;
   }
-  const api = { GROUPS, LIMITS, clone, uid, ex, key, canPair, loadable, roundWeight, target, isManual, setTarget, rest, makeEntries, planEntries, plan, newSession, bodyweight, completeSet, startWork, finishWork, cancelWork, undoSet, fullRecords, exerciseHistory, lastRecords, suggestion, finishSession, accept, substitute, skip, actualLoad, epley, stats, stalled, weeklyVolume, localDate, streak, validate };
+  const api = {
+    GROUPS,
+    LIMITS,
+    clone,
+    uid,
+    ex,
+    key,
+    canPair,
+    loadable,
+    roundWeight,
+    target,
+    isManual,
+    setTarget,
+    rest,
+    makeEntries,
+    planEntries,
+    plan,
+    newSession,
+    bodyweight,
+    completeSet,
+    startWork,
+    finishWork,
+    cancelWork,
+    undoSet,
+    fullRecords,
+    exerciseHistory,
+    lastRecords,
+    suggestion,
+    finishSession,
+    accept,
+    substitute,
+    skip,
+    actualLoad,
+    epley,
+    stats,
+    stalled,
+    weeklyVolume,
+    localDate,
+    streak,
+    validate,
+    migrate,
+    DECISIONS,
+    suggestionSignature,
+    outstanding,
+    decided,
+    normalizeSuggestion,
+    recordSuggestions,
+    retireSuggestions,
+    recomputeSuggestions,
+    outstandingSuggestions,
+    findSuggestion,
+    defer,
+    reject,
+    reopenDeferred
+  };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.ForgeEngine = api;
 })(typeof window !== "undefined" ? window : globalThis);
@@ -770,6 +982,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     const raw = native ? root.Native.loadState() : localStorage.getItem(CURRENT);
     if (raw) {
       const parsed = JSON.parse(raw);
+      if (parsed && parsed.version === 1) root.ForgeEngine.migrate(parsed);
       root.ForgeEngine.validate(parsed);
       store.state = parsed;
     }
@@ -878,7 +1091,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     shoulders: "M5 19v-8l-2-3 4-4h3m4 0h3l4 4-2 3v8M8 4l4 5 4-5M8 12h8m-4-3v10",
     grip: "M5 13V8a2 2 0 0 1 4 0v6-9a2 2 0 0 1 4 0v9-7a2 2 0 0 1 4 0v7-4a2 2 0 0 1 4 0v7c0 4-4 6-8 6-5 0-7-2-9-5l-2-4a2 2 0 0 1 3-2l3 3"
   };
-  const A = { E, Store, Seed, pages: {}, ui: { route: Store.state.session ? "session" : "today", planned: null, libraryBlock: "all", search: "", showSubs: false, showArchived: false, progressExercise: "bench-press", chartMode: "weight", previewBlock: "all", calendar: /* @__PURE__ */ new Date(), historyDate: null, modal: null, lastCommitted: null }, s: () => Store.state };
+  const A = { E, Store, Seed, pages: {}, ui: { route: Store.state.session ? "session" : "today", planned: null, libraryBlock: "all", search: "", showSubs: false, showArchived: false, progressExercise: "bench-press", chartMode: "weight", previewBlock: "all", calendar: /* @__PURE__ */ new Date(), historyDate: null, modal: null, lastCommitted: null, reviewed: false }, s: () => Store.state };
   A.escape = (v) => String(v != null ? v : "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
   A.icon = (name, cls = "") => '<svg class="icon '.concat(cls, '" viewBox="0 0 24 24" aria-hidden="true"><path d="').concat(paths[name] || paths.workout, '"/></svg>');
   A.kg = (v) => v === null || v === void 0 ? "—" : Number(v).toLocaleString(void 0, { maximumFractionDigits: 2 });
@@ -1053,13 +1266,10 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   }
   A.pages.progress = () => {
     const s = A.s(), id = A.ui.progressExercise, e = E.ex(s, id) || s.exercises[0], st = E.stats(s, e.id), volume = E.weeklyVolume(s), stalls = E.stalled(s);
-    const sug = Object.values(s.suggestions).filter((x) => !x.accepted);
+    const sug = E.outstandingSuggestions(s);
     const options = s.exercises.filter((x) => x.active || E.exerciseHistory(s, x.id).length).map((x) => '<option value="'.concat(x.id, '" ').concat(x.id === e.id ? "selected" : "", ">").concat(h(x.name), "</option>")).join("");
     const mode = e.type === "timed" ? "reps" : A.ui.chartMode;
-    const pending = sug.length ? '<section class="card"><div class="between"><h3>Raise? / To?</h3><span class="badge orange">'.concat(sug.length, ' TO REVIEW</span></div><p class="card-desc" style="margin:8px 0 0">Your next step is a suggestion. You’re always in control.</p>').concat(sug.map((x) => {
-      const ex = E.ex(s, x.exerciseId);
-      return '<div class="suggestion-row"><div class="grow"><span class="badge '.concat(x.kind === "deload" ? "yellow" : x.kind === "raise" ? "green" : "purple", '">').concat({ raise: "RAISE", reps: "MORE REPS", time: "MORE TIME", hold: "HOLD", deload: "DELOAD", variation: "LOAD / VARIATION" }[x.kind], "</span><h4>").concat(h(ex.name), " → ").concat(h(A.load(ex, x.weight, x.reps)), "</h4><p>").concat(h(x.reason), '</p></div><div class="flex gap-sm"><button class="icon-btn" data-action="suggestion-edit" data-id="').concat(ex.id, '" aria-label="Edit ').concat(h(ex.name), ' target">').concat(I("edit", "sm"), '</button><button class="btn secondary sm" data-action="accept-suggestion" data-id="').concat(ex.id, '">').concat(I("check", "sm"), "Accept</button></div></div>");
-    }).join(""), "</section>") : "";
+    const pending = sug.length ? '<section class="card"><div class="between"><h3>Raise? / To?</h3><span class="badge orange">'.concat(sug.length, ' TO REVIEW</span></div><p class="card-desc" style="margin:8px 0 0">').concat(sug.filter((x) => x.decision === "deferred").length ? "Deferred items return before your next workout. " : "", "Accept, Reject or Defer each recommendation. Decisions are saved until your next qualifying session.</p>").concat(sug.map((q) => A.recommendationCard(q)).join(""), "</section>") : "";
     const next = s.exercises.filter((x) => x.active && x.primary && (A.ui.previewBlock === "all" || x.block === A.ui.previewBlock)).sort((a, b) => a.order - b.order).map((x) => {
       const t = E.target(s, x);
       return '<div class="next-target"><div class="grow"><strong>'.concat(h(x.name), " ").concat(A.targetFlags(t), "</strong><small>").concat(x.sets, " sets · ").concat(t.configured ? t.manual ? "manual override, saved exactly as entered" : "saved target" : "starting load not confirmed", '</small></div><span class="load">').concat(h(A.load(x, t.weight, t.reps)), '</span><button data-action="target-edit" data-id="').concat(x.id, '" aria-label="Edit ').concat(h(x.name), ' target">').concat(I("edit", "sm"), "</button></div>");
@@ -1117,6 +1327,29 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       const e = E.ex(s, id), t = E.target(s, e);
       return '<div class="setup-row"><div><strong>'.concat(h(e.name), "</strong><small>").concat(h(e.equipment), " · ").concat(e.min, "–").concat(e.max, " ").concat(e.type === "timed" ? "sec" : "reps", '</small></div><div class="input-unit"><input class="start-weight" data-id="').concat(id, '" type="number" min="0" max="1000" step=".25" inputmode="decimal" placeholder="?" value="').concat((_a = s.targets[id].weight) != null ? _a : "", '" aria-label="').concat(h(e.name), ' starting weight"><span>kg</span></div></div>');
     }).join(""), '</div><p class="form-hint">Starting loads you type are saved exactly as entered. “Suggest conservative starts” fills loads that already round to your equipment. You can change them at any time. An empty bar may be the lightest available warm-up.</p>'), close + '<button class="btn primary" data-action="save-starts">Save starting weights ' + I("arrow", "sm") + "</button>", { ids, purpose, entryId });
+  };
+  const decisionBadge = (q) => q.decision === "deferred" ? '<span class="badge yellow">DEFERRED</span>' : '<span class="badge orange">PENDING</span>';
+  const kindBadge = (x) => '<span class="badge '.concat(x.kind === "deload" ? "yellow" : x.kind === "raise" ? "green" : "purple", '">').concat({ raise: "RAISE", reps: "MORE REPS", time: "MORE TIME", hold: "HOLD", deload: "DELOAD", variation: "LOAD / VARIATION" }[x.kind], "</span>");
+  A.recommendationCard = (q, { review = false } = {}) => {
+    const s = A.s(), e = E.ex(s, q.exerciseId);
+    if (!e) return "";
+    const t = E.target(s, e);
+    const where = q.sourceSessionId ? (() => {
+      const sess = s.sessions.find((x) => x.id === q.sourceSessionId);
+      return sess ? " · from " + A.date(sess.endedAt || sess.startedAt) : "";
+    })() : "";
+    const actions = review ? '<div class="flex gap-sm wrap"><button class="btn secondary sm" data-action="review-accept" data-id="'.concat(e.id, '">').concat(I("check", "sm"), 'Accept</button><button class="btn ghost sm" data-action="review-reject" data-id="').concat(e.id, '">').concat(I("skip", "sm"), 'Reject</button><button class="btn ghost sm" data-action="review-defer" data-id="').concat(e.id, '">').concat(I("clock", "sm"), 'Defer</button><button class="icon-btn" data-action="suggestion-edit" data-id="').concat(e.id, '" aria-label="Edit ').concat(h(e.name), ' target">').concat(I("edit", "sm"), "</button></div>") : '<div class="flex gap-sm wrap"><button class="btn secondary sm" data-action="accept-suggestion" data-id="'.concat(e.id, '">').concat(I("check", "sm"), 'Accept</button><button class="btn ghost sm" data-action="reject-suggestion" data-id="').concat(e.id, '">Reject</button><button class="btn ghost sm" data-action="defer-suggestion" data-id="').concat(e.id, '">Defer</button><button class="icon-btn" data-action="suggestion-edit" data-id="').concat(e.id, '" aria-label="Edit ').concat(h(e.name), ' target">').concat(I("edit", "sm"), "</button></div>");
+    return '<div class="suggestion-row"><div class="grow">'.concat(kindBadge(q), " ").concat(decisionBadge(q), "<h4>").concat(h(e.name), " → ").concat(h(A.load(e, q.weight, q.reps)), "</h4><p>").concat(h(q.reason), '</p><p class="form-hint">Current target: ').concat(h(A.load(e, t.weight, t.reps))).concat(t.manual ? " · MANUAL" : "").concat(where ? h(where) : "", "</p></div>").concat(actions, "</div>");
+  };
+  A.openReview = () => {
+    const s = A.s(), list = E.outstandingSuggestions(s);
+    if (!list.length) {
+      A.close();
+      A.toast("No recommendations to review. Your decisions are saved.", 4e3);
+      return;
+    }
+    const rows = list.map((q) => A.recommendationCard(q, { review: true })).join("");
+    A.dialog("review", "Before you train.", '<p class="intro">'.concat(list.length, " recommendation").concat(list.length === 1 ? "" : "s", " from your last recorded session").concat(list.length === 1 ? "" : "s", ". Accept to apply a new target, Reject to keep your current target, or Defer to decide later — nothing changes unless you accept. You can start without deciding.</p>").concat(rows), '<button class="btn ghost" data-action="review-defer-all">Defer all</button><button class="btn ghost" data-action="review-dismiss">Close</button><button class="btn primary" data-action="review-start">Start workout '.concat(I("arrow", "sm"), "</button>"), {}, true);
   };
   A.openTarget = (id, suggestion = false) => {
     const s = A.s(), e = E.ex(s, id), t = E.target(s, e), sug = s.suggestions[id];
@@ -1360,6 +1593,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     const done = E.finishSession(A.s());
     A.ui.lastCommitted = done.id;
     A.ui.planned = null;
+    A.ui.reviewed = false;
     const first = done.records.find((r) => !r.warmup);
     if (first) A.ui.progressExercise = first.exerciseId;
     A.save();
@@ -1367,21 +1601,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     A.navigate("progress");
     A.toast("COMMITTED. Every set is saved.");
   };
-  const recomputeSuggestions = () => {
-    const s = A.s();
-    for (const e of s.exercises) {
-      const last = E.exerciseHistory(s, e.id).pop();
-      if (!last) {
-        delete s.suggestions[e.id];
-        continue;
-      }
-      const sug = E.suggestion(s, e, last.session);
-      if (!sug) continue;
-      const prev = s.suggestions[e.id];
-      if (prev && prev.accepted && prev.sessionId === sug.sessionId && prev.kind === sug.kind && prev.weight === sug.weight && prev.reps === sug.reps) sug.accepted = true;
-      s.suggestions[e.id] = sug;
-    }
-  };
+  const recomputeSuggestions = () => E.recomputeSuggestions(A.s());
   const applyTargetToSession = (id, weight, reps, manual) => {
     const s = A.s(), session = s.session;
     if (!session) return false;
@@ -1400,6 +1620,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     try {
       if (text.length > 64 * 1024 * 1024) throw new Error("Backup is larger than the 64 MB safety limit.");
       const imported = JSON.parse(text);
+      E.migrate(imported);
       E.validate(imported);
       A.dialog("restore", "Restore this workspace?", '<p class="intro">This replaces <b>all current data</b>. Export a backup first if you want to keep it.</p><div class="summary-values"><div class="summary-line"><span>Exercises</span><strong>'.concat(imported.exercises.length, '</strong></div><div class="summary-line"><span>Saved sessions</span><strong>').concat(imported.sessions.length, '</strong></div><div class="summary-line"><span>Body weight entries</span><strong>').concat(imported.bodyweights.length, '</strong></div><div class="summary-line"><span>Active workout</span><strong>').concat(imported.session ? "Yes · will resume" : "No", '</strong></div></div><div class="notice">Restoring is all-or-nothing. Invalid or unsupported files are rejected without changing your data.</div>'), '<button class="btn ghost" data-action="close-modal">Cancel</button><button class="btn primary" data-action="restore-confirm">Restore all data '.concat(I("upload", "sm"), "</button>"), { imported });
     } catch (e) {
@@ -1409,6 +1630,7 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
   A.restorePreviousWorkspace = (text) => {
     var _a2;
     const parsed = JSON.parse(text);
+    E.migrate(parsed);
     E.validate(parsed);
     A.captureLog();
     A.Store.restorePrevious(text);
@@ -1449,7 +1671,11 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
         A.toast("Recovery failed: " + e.message + " Your current workspace is unchanged.", 9e3);
       }
     },
-    "close-modal": () => A.close(),
+    "close-modal": () => {
+      var _a2;
+      if (((_a2 = A.ui.modal) == null ? void 0 : _a2.type) === "review") A.ui.reviewed = true;
+      A.close();
+    },
     "preview-info": () => A.previewInfo(),
     "help": () => A.help(),
     "confirm-dialog": () => {
@@ -1495,9 +1721,80 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
         A.toast("Choose at least one muscle block.");
         return;
       }
+      if (!A.ui.reviewed && E.outstandingSuggestions(A.s()).length) {
+        A.openReview();
+        return;
+      }
+      actions["continue-plan"]();
+    },
+    "continue-plan": () => {
+      if (A.s().session) {
+        A.navigate("session");
+        return;
+      }
+      const p = E.plan(A.s(), A.s().settings.selectedBlocks, A.s().settings.budget);
+      if (!p.entries.length) {
+        A.toast("Choose at least one muscle block.");
+        return;
+      }
       const unknown = p.entries.map((x) => x.exerciseId).filter((id) => A.s().targets[id].weight === null);
       if (unknown.length) A.openStarts(unknown);
       else A.buildPlan();
+    },
+    "review-dismiss": () => {
+      A.ui.reviewed = true;
+      A.close();
+      A.render();
+    },
+    "review-accept": (d) => {
+      const s = A.s();
+      if (!E.accept(s, d.id)) {
+        A.toast("That recommendation changed. Reopen the review.", 5e3);
+        A.openReview();
+        return;
+      }
+      const e = E.ex(s, d.id), t = E.target(s, e);
+      applyTargetToSession(d.id, t.weight, t.reps, t.manual === true);
+      A.save();
+      A.refreshPlanned();
+      A.openReview();
+      A.toast("Accepted: " + e.name + " → " + A.load(e, t.weight, t.reps), 4e3);
+    },
+    "review-reject": (d) => {
+      const s = A.s(), e = E.ex(s, d.id), t = E.target(s, e);
+      if (!E.reject(s, d.id)) {
+        A.toast("That recommendation changed. Reopen the review.", 5e3);
+        A.openReview();
+        return;
+      }
+      A.save();
+      A.refreshPlanned();
+      A.openReview();
+      A.toast("Set aside. " + e.name + " stays at " + A.load(e, t.weight, t.reps) + ".", 4e3);
+    },
+    "review-defer": (d) => {
+      const s = A.s();
+      if (!E.defer(s, d.id)) {
+        A.toast("That recommendation changed. Reopen the review.", 5e3);
+        A.openReview();
+        return;
+      }
+      A.save();
+      A.openReview();
+      A.toast(E.ex(s, d.id).name + " deferred. It returns before your next workout.", 4e3);
+    },
+    "review-defer-all": () => {
+      const s = A.s();
+      let count = 0;
+      for (const q of E.outstandingSuggestions(s)) if (E.defer(s, q.exerciseId)) count++;
+      A.save();
+      A.openReview();
+      A.toast(count ? count + " recommendation(s) deferred to your next workout." : "Nothing is outstanding.", 4e3);
+    },
+    "review-start": () => {
+      A.ui.reviewed = true;
+      A.close();
+      actions["continue-plan"]();
     },
     "conservative-starts": () => {
       document.querySelectorAll(".start-weight").forEach((input) => {
@@ -1730,6 +2027,28 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
       refreshActiveTimer();
       A.render();
       A.toast("Next target accepted: " + A.load(e, t.weight, t.reps), 5e3);
+    },
+    "reject-suggestion": (d) => {
+      const s = A.s(), e = E.ex(s, d.id);
+      if (!E.reject(s, d.id)) {
+        A.toast("That recommendation is no longer available.", 4e3);
+        return;
+      }
+      const t = E.target(s, e);
+      A.save();
+      A.refreshPlanned();
+      A.render();
+      A.toast("Set aside. " + e.name + " stays at " + A.load(e, t.weight, t.reps) + ". It returns after your next qualifying session.", 5500);
+    },
+    "defer-suggestion": (d) => {
+      const s = A.s(), e = E.ex(s, d.id);
+      if (!E.defer(s, d.id)) {
+        A.toast("That recommendation is no longer available.", 4e3);
+        return;
+      }
+      A.save();
+      A.render();
+      A.toast(e.name + " deferred. It returns before your next workout.", 5e3);
     },
     "chart-mode": (d) => {
       A.ui.chartMode = d.value;
