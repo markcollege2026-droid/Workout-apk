@@ -104,6 +104,10 @@ function adoptDecision(prev,q){
   // Same proposal: keep the decision and the timestamps that say when the user made it.
   // Recalculation must not move a deferral or a rejection forward in time.
   const out={...q,decision:prev.decision,decidedAt:prev.decidedAt??null};
+  // createdAt answers "when did this proposal first appear?", so adoption keeps the
+  // original moment instead of restamping it with the recalculation time. A genuinely new
+  // proposal never reaches this function, so it still gets a fresh createdAt.
+  if(Number.isFinite(prev.createdAt))out.createdAt=prev.createdAt;
   for(const f of ['deferredAt','rejectedAt','manualOverrideAt','targetSnapshot'])if(prev[f]!==undefined)out[f]=prev[f];
   if(prev.decision!=='rejected')delete out.rejectedAt;
   if(prev.decision!=='deferred')delete out.deferredAt;
@@ -191,8 +195,9 @@ function setTarget(s,e,weight,reps){
   const record=s.suggestions?.[e.id];
   let settled=false;
   if(record&&outstanding(record)){
+    const at=Date.now();
     record.decision='rejected';record.accepted=false;
-    record.decidedAt=Date.now();record.rejectedAt=record.decidedAt;
+    record.decidedAt=at;record.rejectedAt=at;
     delete record.deferredAt;
     record.targetSnapshot={weight:stored.weight,reps:stored.reps};
     record.decisionNote='manual target kept';
@@ -442,7 +447,8 @@ function defer(s,id){
 function reject(s,id){
   const sug=findSuggestion(s,id);if(!sug||!outstanding(sug))return false;
   const t=target(s,ex(s,id));
-  sug.decision='rejected';sug.accepted=false;sug.rejectedAt=Date.now();sug.decidedAt=Date.now();
+  const at=Date.now();
+  sug.decision='rejected';sug.accepted=false;sug.rejectedAt=at;sug.decidedAt=at;
   sug.targetSnapshot={weight:t.weight,reps:t.reps};
   delete sug.deferredAt;
   return true;

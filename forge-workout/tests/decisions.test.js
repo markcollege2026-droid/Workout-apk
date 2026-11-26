@@ -398,6 +398,91 @@ test('recomputing a deferred recommendation never moves its deferral timestamp',
   assert.equal(s.suggestions['bench-press'].decision,'rejected');
 });
 
+test('the same proposal keeps its createdAt when it passes through adoption again',()=>{
+  const s=state();
+  s.targets['bench-press']={weight:100,reps:8};
+  const perf=workout(s,'bench-press',10);
+  const first=s.suggestions['bench-press'];
+  assert(Number.isFinite(first.createdAt),'the proposal records when it first appeared');
+  const born=first.createdAt;
+  E.defer(s,'bench-press');
+  const deferral=s.suggestions['bench-press'].deferredAt;
+
+  // Path 1: the same completed performance is recorded again. recordSuggestions is exported
+  // and re-running it for a session that already produced a record must ADOPT that record,
+  // not mint a new proposal with a new generation time.
+  E.recordSuggestions(s,perf,born+30000);
+  const adopted=s.suggestions['bench-press'];
+  assert.equal(adopted.sourceSessionId,first.sourceSessionId,'same proposal, same source');
+  assert.equal(adopted.signature,first.signature,'same proposal, same signature');
+  assert.equal(adopted.createdAt,born,'re-recording the same performance does not restamp createdAt');
+  assert.equal(adopted.decision,'deferred','the decision survives adoption');
+  assert.equal(adopted.deferredAt,deferral,'and so does the deferral time');
+
+  // Path 2: a legacy schema-v2 record without a signature is re-adopted on every
+  // recalculation (validate() explicitly allows the field to be absent), which is the
+  // reachable way an already-stored record passes through adoption again.
+  delete adopted.signature;
+  assert.equal(E.validate(JSON.parse(JSON.stringify(s))),true,'a signature-less v2 record is valid');
+  E.recomputeSuggestions(s,born+60000);
+  const migrated=s.suggestions['bench-press'];
+  assert(!!migrated.signature,'recalculation re-adopts the record and rebuilds the signature');
+  assert.equal(migrated.createdAt,born,'adoption preserves the first-generation time');
+  assert.equal(migrated.decision,'deferred');
+  assert.equal(migrated.deferredAt,deferral,'and the deferral time');
+
+  // A genuinely new proposal is not an adoption: it takes the timestamp of ITS generation.
+  E.accept(s,'bench-press');
+  const e2=get(s,'bench-press');
+  const later={id:E.uid(),exerciseId:'bench-press',sourceId:'bench-press',pairGroup:e2.group,sets:e2.sets,
+    targetWeight:s.targets['bench-press'].weight,targetReps:e2.max,manualTarget:false,skipped:false};
+  const perf2At=tick();
+  const perf2={id:'perf-second',startedAt:perf2At,endedAt:perf2At+500,blocks:['chest'],entries:[later],
+    records:[],queue:[],timer:null,workTimer:null,pendingLogId:null,note:'',exerciseSnapshot:{}};
+  for(let i=0;i<e2.sets;i++)perf2.records.push({id:E.uid(),entryId:later.id,exerciseId:'bench-press',
+    setIndex:i+1,min:e2.min,max:e2.max,weight:later.targetWeight,reps:e2.max,warmup:false,confirmed:true,
+    rir:null,note:'',failed:false,bodyweight:null});
+  s.sessions.push(perf2);
+  assert.equal(E.exerciseHistory(s,'bench-press').pop().session.id,'perf-second','the new performance is the latest one');
+  E.recordSuggestions(s,perf2,born+120000);
+  const fresh=s.suggestions['bench-press'];
+  assert.notEqual(fresh.sourceSessionId,migrated.sourceSessionId,'a new performance is a new proposal');
+  assert.equal(fresh.createdAt,born+120000,'a new proposal takes its own generation time, not the old one');
+  assert.equal(fresh.decision,'pending','and is unreviewed again');
+});
+
+test('a decision records one timestamp for the one settlement event',()=>{
+  // The real clock advances between adjacent Date.now() calls only rarely (about 1 in
+  // 20,000 pairs), so a plain assertion would almost never catch a second call. A stepped
+  // clock makes every call land in a different millisecond, which exposes the difference.
+  const realNow=Date.now;
+  let now=1700000000000;
+  const step=()=>{Date.now=()=>{now+=7;return now;};};
+  try{
+    step();
+    const s=state();
+    s.targets['bench-press']={weight:100,reps:8};
+    workout(s,'bench-press',10);
+    E.reject(s,'bench-press');
+    const rejected=s.suggestions['bench-press'];
+    assert.equal(rejected.rejectedAt,rejected.decidedAt,'rejecting is a single event with a single time');
+    assert(rejected.createdAt<=rejected.decidedAt,'the proposal came first');
+
+    // A deferred proposal settled by a manual edit is the same single event.
+    const s2=state();
+    s2.targets['bench-press']={weight:100,reps:8};
+    workout(s2,'bench-press',10);
+    const born=s2.suggestions['bench-press'].createdAt;
+    E.defer(s2,'bench-press');
+    E.setTarget(s2,get(s2,'bench-press'),97.5,6);
+    const settled=s2.suggestions['bench-press'];
+    assert.equal(settled.decidedAt,settled.rejectedAt,'manual settlement stamps one moment');
+    assert.equal(settled.deferredAt,undefined);
+    assert(settled.createdAt<=settled.decidedAt);
+    assert.equal(settled.createdAt,born,'settling does not move the first-generation time');
+  }finally{Date.now=realNow;}
+});
+
 test('reject() only decides an outstanding recommendation',()=>{
   const s=state();
   s.targets['bench-press']={weight:100,reps:8};
