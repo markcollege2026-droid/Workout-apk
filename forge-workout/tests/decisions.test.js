@@ -563,6 +563,236 @@ test('manual overrides survive the backup round trip alongside their decisions',
 });
 
 // ---------------------------------------------------------------------------
+// 5c. A manually selected target is the benchmark for progression
+// ---------------------------------------------------------------------------
+
+/* One completed performance for a single exercise. `manual` marks the entry as carrying a
+   user-chosen target, which is what the engine must judge the sets against. */
+function performance(s,id,{reps,weight,targetReps,manual=false,rir=null,at=tick(),sets=null,skip=false}={}){
+  const e=get(s,id),plannedSets=sets??e.sets;
+  const en={id:E.uid(),exerciseId:id,sourceId:id,pairGroup:e.group,sets:plannedSets,
+    targetWeight:weight,targetReps,manualTarget:manual,skipped:skip};
+  const sess={id:E.uid(),startedAt:at,endedAt:at+600000,durationSeconds:600,blocks:['chest'],
+    entries:[en],records:[],queue:[],timer:null,workTimer:null,pendingLogId:null,note:'',
+    exerciseSnapshot:{[id]:E.clone(e)}};
+  if(!en.skipped)reps.forEach((r,i)=>sess.records.push({id:E.uid(),entryId:en.id,exerciseId:id,setIndex:i+1,
+    min:manual?Math.min(e.min,targetReps):e.min,max:e.max,weight,reps:r,warmup:false,
+    confirmed:true,rir,note:'',failed:false,bodyweight:null}));
+  s.sessions.push(sess);
+  return sess;
+}
+
+test('regression 1: automatic progression is unchanged when no target was chosen by hand',()=>{
+  const s=state(),e=get(s,'bench-press');               // default range 6-10
+  const top=E.suggestion(s,e,performance(s,'bench-press',{reps:[10,10,10],weight:100,targetReps:10}));
+  assert.equal(top.kind,'raise');
+  assert.equal(top.weight,102.5);
+  assert.equal(top.reps,6);
+  assert.equal(top.reason,'Every set reached the top of the range. Raise to the next safe, loadable weight.');
+
+  const partial=E.suggestion(s,e,performance(s,'bench-press',{reps:[10,10,9],weight:100,targetReps:8}));
+  assert.equal(partial.kind,'reps');
+  assert.equal(partial.reps,9);
+
+  const s2=state();
+  performance(s2,'bench-press',{reps:[5,5,6],weight:100,targetReps:6});
+  const deload=E.suggestion(s2,get(s2,'bench-press'),performance(s2,'bench-press',{reps:[5,4,6],weight:100,targetReps:6}));
+  assert.equal(deload.kind,'deload');
+  assert.equal(deload.weight,90);
+  assert.equal(deload.reps,6);
+  assert.equal(deload.reason,'Below the minimum on at least half your sets twice in a row. Consider a 10% deload.');
+
+  // The RIR rule is unchanged for automatic targets: one 0-RIR top-range session holds,
+  // the second earns the raise.
+  const rir=state(),re=get(rir,'bench-press');
+  assert.equal(E.suggestion(rir,re,performance(rir,'bench-press',{reps:[10,10,10],weight:100,targetReps:10,rir:0})).kind,'hold');
+  const second=E.suggestion(rir,re,performance(rir,'bench-press',{reps:[10,10,10],weight:100,targetReps:10,rir:0}));
+  assert.equal(second.kind,'raise');
+  assert.equal(second.weight,102.5);
+  assert.equal(second.reps,6);
+});
+
+test('regression 2: a manual target above the range is not achieved at the default maximum',()=>{
+  const s=state(),e=get(s,'bench-press');               // range 6-10, manual target 12
+  const sug=E.suggestion(s,e,performance(s,'bench-press',{reps:[10,10,10],weight:100,targetReps:12,manual:true}));
+  assert.equal(sug.kind,'hold','reaching the default ceiling is not reaching 12 reps');
+  assert.equal(sug.weight,100,'no weight increase is proposed');
+  assert.equal(sug.reps,12,'the chosen target is preserved');
+  assert.match(sug.reason,/target of 12 reps/i);
+});
+
+test('regression 3: two consecutive missed manual targets justify a deload',()=>{
+  const s=state(),e=get(s,'bench-press');
+  performance(s,'bench-press',{reps:[8,8,8],weight:100,targetReps:12,manual:true});
+  const sug=E.suggestion(s,e,performance(s,'bench-press',{reps:[8,8,9],weight:100,targetReps:12,manual:true}));
+  assert.equal(sug.kind,'deload');
+  assert.equal(sug.weight,90,'10% below the 100 kg the user actually lifted');
+  assert.equal(sug.reps,12,'the manually chosen 12 reps are preserved');
+  assert.match(sug.reason,/target of 12 reps/i);
+  assert.match(sug.reason,/10% deload/);
+});
+
+test('regression 4: one missed manual-target session does not trigger a deload',()=>{
+  const s=state(),e=get(s,'bench-press');
+  const sug=E.suggestion(s,e,performance(s,'bench-press',{reps:[8,8,8],weight:100,targetReps:12,manual:true}));
+  assert.equal(sug.kind,'hold','a single missed target only asks for a repeat');
+  assert.equal(sug.weight,100);
+  assert.equal(sug.reps,12);
+  assert.match(sug.reason,/Repeat this load/);
+});
+
+test('regression 5: a manual deload keeps the chosen rep target instead of resetting to the range minimum',()=>{
+  const s=state(),e=get(s,'bench-press');
+  performance(s,'bench-press',{reps:[10,10,10],weight:100,targetReps:12,manual:true});
+  const sug=E.suggestion(s,e,performance(s,'bench-press',{reps:[10,9,10],weight:100,targetReps:12,manual:true}));
+  assert.equal(sug.kind,'deload');
+  assert.equal(sug.reps,12,'not the exercise minimum of 6');
+  assert.notEqual(sug.reps,e.min);
+  // A manual target BELOW the range is preserved just as exactly.
+  const s2=state();
+  performance(s2,'bench-press',{reps:[2,2,2],weight:100,targetReps:4,manual:true});
+  const low=E.suggestion(s2,get(s2,'bench-press'),performance(s2,'bench-press',{reps:[2,2,2],weight:100,targetReps:4,manual:true}));
+  assert.equal(low.kind,'deload');
+  assert.equal(low.reps,4,'a target below the range is still the target');
+});
+
+test('regression 6: the deload weight comes from the manually selected weight',()=>{
+  const s=state(),e=get(s,'bench-press');
+  performance(s,'bench-press',{reps:[5,5,5],weight:120,targetReps:10,manual:true});
+  const sug=E.suggestion(s,e,performance(s,'bench-press',{reps:[5,5,5],weight:120,targetReps:10,manual:true}));
+  assert.equal(sug.kind,'deload');
+  assert.equal(sug.weight,107.5,'10% below 120 kg, rounded down to a loadable weight');
+  assert(E.loadable(s,e).includes(sug.weight),'the reduced weight stays loadable');
+
+  // An unloadable manual weight is still reduced from itself, not from a default.
+  const s2=state();
+  performance(s2,'bench-press',{reps:[6,6,6],weight:137.5,targetReps:9,manual:true});
+  const odd=E.suggestion(s2,get(s2,'bench-press'),performance(s2,'bench-press',{reps:[6,6,6],weight:137.5,targetReps:9,manual:true}));
+  assert.equal(odd.kind,'deload');
+  assert.equal(odd.weight,122.5,'137.5 kg * 0.9 rounded down');
+});
+
+test('regression 6b: when the equipment cannot load lighter, the deload explains it instead of pretending',()=>{
+  const s=state(),e=get(s,'bench-press');
+  const lightest=E.loadable(s,e)[0];
+  performance(s,'bench-press',{reps:[5,5,5],weight:lightest,targetReps:8,manual:true});
+  const sug=E.suggestion(s,e,performance(s,'bench-press',{reps:[5,5,5],weight:lightest,targetReps:8,manual:true}));
+  assert.equal(sug.kind,'deload','the recommendation is still surfaced');
+  assert.equal(sug.weight,lightest,'but no lighter load is invented');
+  assert.match(sug.reason,/cannot load a lighter weight/);
+  assert.match(sug.reason,/easier variation/);
+  assert.equal(sug.reps,8,'the chosen reps are preserved');
+});
+
+test('regression 7: RIR-based holds respect a manual target',()=>{
+  const s=state(),e=get(s,'bench-press');
+  // Manual 12 reps, completed with 0 reps in reserve: the target was reached, so the
+  // existing one-session 0-RIR hold applies, at the user's load and reps.
+  const reached=E.suggestion(s,e,performance(s,'bench-press',{reps:[12,12,12],weight:100,targetReps:12,manual:true,rir:0}));
+  assert.equal(reached.kind,'hold');
+  assert.equal(reached.weight,100);
+  assert.equal(reached.reps,12);
+  assert.match(reached.reason,/0 reps in reserve/);
+
+  // Manual 12 reps but only 10 completed: the target was NOT reached, so no 0-RIR hold
+  // reason and no increase — the engine asks for the target again.
+  const missedTarget=E.suggestion(s,e,performance(s,'bench-press',{reps:[10,10,10],weight:100,targetReps:12,manual:true,rir:0}));
+  assert.equal(missedTarget.kind,'hold');
+  assert.equal(missedTarget.weight,100);
+  assert.match(missedTarget.reason,/target of 12 reps/i);
+  assert.doesNotMatch(missedTarget.reason,/reps in reserve/i);
+});
+
+test('regression 8: an achieved target below the default minimum is never a miss or a deload',()=>{
+  const s=state(),e=get(s,'bench-press');               // range 6-10
+  const sug=E.suggestion(s,e,performance(s,'bench-press',{reps:[4,4,4],weight:100,targetReps:4,manual:true}));
+  assert.notEqual(sug.kind,'deload','meeting a deliberate low target is success');
+  assert.doesNotMatch(sug.reason,/deload|Below the/i);
+  // Meeting the chosen target earns the normal progression, and the 4 reps stay the
+  // benchmark rather than being reset to the range floor of 6.
+  assert.equal(sug.kind,'raise');
+  assert.equal(sug.weight,102.5);
+  assert.equal(sug.reps,4,'the deliberate rep target is carried forward, not the range minimum');
+});
+
+test('regression 9: skipped and incomplete exercises never count as missed sessions',()=>{
+  const s=state(),e=get(s,'bench-press');
+  // A skipped exercise logs no sets, so it is not a qualifying performance.
+  const skipped=performance(s,'bench-press',{reps:[3,3,3],weight:100,targetReps:12,manual:true,skip:true});
+  assert.equal(skipped.entries[0].skipped,true);
+  assert.equal(skipped.records.length,0,'a skipped exercise logs nothing');
+  assert.equal(E.fullRecords(skipped,'bench-press'),null,'a skipped exercise is not a full record');
+  assert.equal(E.exerciseHistory(s,'bench-press').length,0,'and never enters the progression history');
+
+  // An incomplete exercise (fewer confirmed sets than planned) is not a full record either.
+  const s2=state();
+  performance(s2,'bench-press',{reps:[3,3,3],weight:100,targetReps:12,manual:true});
+  const partial=performance(s2,'bench-press',{reps:[3],weight:100,targetReps:12,manual:true});
+  assert.equal(E.fullRecords(partial,'bench-press'),null,'an incomplete exercise is not a qualifying session');
+  // The one truly missed session still only asks for a repeat, not a deload.
+  const sug=E.suggestion(s2,get(s2,'bench-press'),s2.sessions[0]);
+  assert.equal(sug.kind,'hold');
+
+  // And a skipped exercise cannot supply a decision record either.
+  const s3=state();
+  const only=performance(s3,'bench-press',{reps:[3,3,3],weight:100,targetReps:12,manual:true,skip:true});
+  E.recordSuggestions(s3,only);
+  assert.equal(s3.suggestions['bench-press'],undefined,'a skipped exercise never generates a recommendation');
+});
+
+test('regression 10: manual targets survive saving, reloading and recommendation recomputation',()=>{
+  const s=state();
+  E.setTarget(s,get(s,'bench-press'),137.5,12);          // deliberately above the 6-10 range
+  performance(s,'bench-press',{reps:[10,10,10],weight:137.5,targetReps:12,manual:true});
+  E.recomputeSuggestions(s);
+  const backup=JSON.parse(JSON.stringify(s));
+  assert.equal(E.validate(backup),true,'the saved state is valid');
+  const restored=E.migrate(backup);
+
+  assert.equal(restored.targets['bench-press'].weight,137.5,'the manual weight is preserved exactly');
+  assert.equal(restored.targets['bench-press'].reps,12,'the manual reps are preserved exactly');
+  assert.equal(restored.targets['bench-press'].manual,true);
+
+  const sug=restored.suggestions['bench-press'];
+  assert.equal(sug.kind,'hold','reaching the default ceiling did not satisfy the manual 12');
+  assert.equal(sug.weight,137.5);
+  assert.equal(sug.reps,12);
+
+  // Recomputation must reach the same verdict.
+  E.recomputeSuggestions(restored,tick());
+  const again=restored.suggestions['bench-press'];
+  assert.equal(again.kind,'hold');
+  assert.equal(again.weight,137.5);
+  assert.equal(again.reps,12);
+  assert.equal(E.target(restored,get(restored,'bench-press')).weight,137.5,'the target is never overwritten');
+  assert.equal(E.target(restored,get(restored,'bench-press')).reps,12);
+});
+
+test('regression 11: accepting a recommendation and manually overriding still work',()=>{
+  const s=state(),e=get(s,'bench-press');
+  performance(s,'bench-press',{reps:[10,10,10],weight:100,targetReps:12,manual:true});
+  E.recomputeSuggestions(s);
+  const sug=E.suggestion(s,e,s.sessions[0]);
+  assert.equal(sug.kind,'hold');
+  assert.equal(E.accept(s,'bench-press'),true,'an outstanding recommendation is still acceptable');
+  assert.equal(s.targets['bench-press'].weight,100,'accepting applies the proposed target');
+  assert.equal(s.targets['bench-press'].reps,12);
+  assert.equal(s.suggestions['bench-press'].decision,'accepted');
+
+  // An explicit user target still wins over the pending recommendation.
+  const s2=state();
+  E.setTarget(s2,get(s2,'bench-press'),137.5,9);
+  performance(s2,'bench-press',{reps:[7,7,7],weight:137.5,targetReps:9,manual:true});
+  E.recomputeSuggestions(s2);
+  const pending=s2.suggestions['bench-press'];
+  assert.notEqual(pending.decision,'accepted','the engine never accepts on the user\'s behalf');
+  E.setTarget(s2,get(s2,'bench-press'),140,8);
+  assert.equal(s2.targets['bench-press'].weight,140,'the user-entered value is kept exactly');
+  assert.equal(s2.targets['bench-press'].reps,8);
+  assert.equal(E.target(s2,get(s2,'bench-press')).weight,140);
+});
+
+// ---------------------------------------------------------------------------
 // 6. Migration of old schema
 // ---------------------------------------------------------------------------
 

@@ -362,41 +362,84 @@ function exerciseHistory(s,id){
   return s.sessions.filter(x=>fullRecords(x,id)).sort((a,b)=>a.startedAt-b.startedAt).map(x=>({session:x,...fullRecords(x,id)}));
 }
 function lastRecords(s,id){return [...s.sessions].sort((a,b)=>b.startedAt-a.startedAt).map(x=>x.records.filter(r=>r.exerciseId===id&&!r.warmup&&r.confirmed)).find(r=>r.length)||[];}
-function missed(e,records){return records.filter(r=>r.reps<(r.min??e.min)||r.failed).length>=Math.ceil(records.length/2);}
+/* The benchmark for a set is the target that was in effect for THAT session: a manually
+   selected rep target is judged against itself, never against the exercise's default
+   range. Automatic targets keep their existing per-set floor (the record's own min, which
+   planEntries derives from the exercise range and the manual choice alike), so automatic
+   progression is unaffected. */
+function targetRepsFor(entry,records,e){
+  if(entry&&entry.manualTarget===true)return Math.round(number(entry.targetReps,e.min));
+  return null;
+}
+function belowTarget(record,manualReps,e){
+  if(record.failed)return true;
+  return record.reps<(manualReps??record.min??e.min);
+}
+function missed(e,records,manualReps=null){return records.filter(r=>belowTarget(r,manualReps,e)).length>=Math.ceil(records.length/2);}
+/* Progression is evaluated against the target that was actually in effect for the session.
+   A manually selected target is its own benchmark (its weight and its reps); an automatic
+   target keeps using the exercise's default range exactly as before. */
+function benchmark(e,entry,records){
+  const manual=!!entry&&entry.manualTarget===true;
+  const reps=manual?targetRepsFor(entry,records,e):null;
+  return {manual,base:number(entry&&entry.targetWeight,0),reps:manual?reps:number(entry&&entry.targetReps,e.min),
+    // A manual target is the ceiling the user chose; the default tests against the range top.
+    top:manual?reps:e.max,
+    // A manual target is a single point, not a range: the chosen reps are both the ceiling
+    // the user must reach and the rep target a deload/hold must preserve. Automatic
+    // proposals keep the exercise minimum, so their maths are unchanged.
+    floor:manual?reps:e.min};
+}
 function suggestion(s,e,session){
   const current=fullRecords(session,e.id);if(!current)return null;
   const {entry,records}=current;
-  const base=entry.targetWeight;const reps=entry.targetReps;
+  const b=benchmark(e,entry,records);
+  const base=b.base;const reps=b.reps;const top=b.top;const floor=b.floor;
   const prev=exerciseHistory(s,e.id).filter(x=>x.session.id!==session.id&&x.session.startedAt<session.startedAt).pop();
   const obj={sessionId:session.id,exerciseId:e.id,weight:base,reps,kind:'hold',accepted:false,reason:'Repeat this load and build clean reps.'};
-  if(missed(e,records)){
-    if(prev&&missed(e,prev.records)){
-      obj.kind='deload';obj.weight=roundWeight(s,e,base*.9,'down');obj.reps=e.min;
-      obj.reason='Below the minimum on at least half your sets twice in a row. Consider a 10% deload.';
-      if(obj.weight>=base)obj.reason+=' Your equipment cannot load a lighter weight; use an easier variation.';
-    }else obj.reason='Minimum missed. Repeat this load; skipped and incomplete exercises never count as misses.';
+  // Two consecutive missed sessions are still required; a skipped or incomplete exercise
+  // never appears in the history, so it can neither cause nor reset a deload.
+  if(missed(e,records,b.manual?reps:null)){
+    const prevMissed=prev&&missed(e,prev.records,targetRepsFor(prev.entry,prev.records,e));
+    if(prevMissed){
+      const reduced=roundWeight(s,e,base*.9,'down');
+      // The reduction is taken from the target the user actually lifted, and the reps the
+      // user chose are preserved rather than reset to the exercise minimum.
+      obj.kind='deload';obj.weight=reduced;obj.reps=floor;
+      obj.reason='Below the '+(b.manual?'target of '+reps+(e.type==='timed'?' seconds':' reps'):'minimum')+' on at least half your sets twice in a row. Consider a 10% deload.';
+      if(reduced>=base)obj.reason+=' Your equipment cannot load a lighter weight; use an easier variation.';
+    }else obj.reason=(b.manual?'Target of '+reps+(e.type==='timed'?' seconds':' reps')+' missed':'Minimum missed')+'. Repeat this load; skipped and incomplete exercises never count as misses.';
     return obj;
   }
-  const isTop=records.every(r=>r.reps>=e.max&&!r.failed&&r.weight>=base);
+  const isTop=records.every(r=>r.reps>=top&&!r.failed&&r.weight>=base);
   if(e.type==='timed'&&e.id!=='farmer-carries'&&e.max>e.min){
+    // Unchanged timed progression: it only fires once the declared target itself is met.
+    // A manual target above the default maximum is judged by `isTop` further down, so
+    // reaching only the default ceiling never counts as completing a longer chosen hold.
     if(records.every(r=>r.reps>=reps)&&reps<e.max){obj.kind='time';obj.reps=Math.min(e.max,reps+5);obj.reason='All timed sets completed. Add 5 seconds next session.';return obj;}
     if(!isTop){obj.reason='Keep this duration until every set is complete.';return obj;}
     obj.kind='variation';obj.reason='Time ceiling reached. Add load or choose a harder variation.';return obj;
   }
   if(!isTop){
     const minDone=Math.min(...records.map(r=>r.reps));
-    obj.reps=Math.min(e.max,Math.max(e.min,Math.min(reps+1,minDone+1)));
+    obj.reps=Math.min(top,Math.max(floor,Math.min(reps+1,minDone+1)));
     obj.kind=obj.reps>reps?'reps':'hold';obj.reason='Keep the load. Aim for '+obj.reps+(e.type==='timed'?' seconds':' reps')+' on every set.';
     return obj;
   }
-  obj.reps=e.max;
-  const previousHeld=prev&&prev.entry.targetWeight===base&&prev.records.every(r=>r.reps>=e.max&&r.weight>=base)&&prev.records.some(r=>r.rir===0);
+  obj.reps=top;
+  // The RIR hold is judged against the same benchmark as everything else: a manual target
+  // was only "reached" when its own reps were met, and the previous session counts as held
+  // only if it met that target too.
+  const prevTop=prev?targetRepsFor(prev.entry,prev.records,e)??e.max:null;
+  const previousHeld=prev&&prev.entry.targetWeight===base&&prev.records.every(r=>r.reps>=prevTop&&r.weight>=base)&&prev.records.some(r=>r.rir===0);
   if(records.some(r=>r.rir===0)&&!previousHeld){obj.reason='Top of range, but 0 reps in reserve. Hold this load for one more session.';return obj;}
-  const double=e.type!=='timed'&&records.every(r=>r.reps>=e.max+2);const inc=e.increment*(double?2:1);
+  // A manual target was not "achieved" unless its own reps were met, so it never earns the
+  // double increment; the increase itself is still the exercise's normal increment.
+  const double=!b.manual&&e.type!=='timed'&&records.every(r=>r.reps>=e.max+2);const inc=e.increment*(double?2:1);
   let load=Math.min(...records.map(r=>r.weight));
   const bw=e.type==='bodyweight'?bodyweight(s,session.startedAt):0;
   if(load===0&&(!bw||bw===0)){
-    obj.kind='variation';obj.weight=roundWeight(s,e,e.increment,'up');obj.reps=e.min;
+    obj.kind='variation';obj.weight=roundWeight(s,e,e.increment,'up');obj.reps=floor;
     obj.reason='All sets at the top. Consider added load or a harder variation. Log body weight to enforce the 5% total-load cap.';return obj;
   }
   const cap=load+(load+(bw||0))*s.settings.safeJump/100;
@@ -405,8 +448,8 @@ function suggestion(s,e,session){
   if(next===undefined){
     obj.weight=load;obj.reason='Top of range reached, but the next loadable step exceeds your '+s.settings.safeJump+'% safe-jump cap. Edit the target to override.';return obj;
   }
-  obj.kind='raise';obj.weight=next;obj.reps=e.min;
-  obj.reason=(double?'Every set beat the ceiling by 2+ reps. Double increment, capped at '+s.settings.safeJump+'%.':'Every set reached the top of the range. Raise to the next safe, loadable weight.')+(e.type==='bodyweight'?' Added weight; total load includes your body weight.':'');
+  obj.kind='raise';obj.weight=next;obj.reps=floor;
+  obj.reason=(double?'Every set beat the ceiling by 2+ reps. Double increment, capped at '+s.settings.safeJump+'%.':b.manual?'Every set reached your '+reps+(e.type==='timed'?'-second':' -rep')+' target. Raise to the next safe, loadable weight.':'Every set reached the top of the range. Raise to the next safe, loadable weight.')+(e.type==='bodyweight'?' Added weight; total load includes your body weight.':'');
   return obj;
 }
 function finishSession(s){
