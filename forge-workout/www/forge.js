@@ -1342,7 +1342,8 @@ var __spreadProps = (a, b) => __defProps(a, __getOwnPropDescs(b));
     return '<div class="suggestion-row"><div class="grow">'.concat(kindBadge(q), " ").concat(decisionBadge(q), "<h4>").concat(h(e.name), " → ").concat(h(A.load(e, q.weight, q.reps)), "</h4><p>").concat(h(q.reason), '</p><p class="form-hint">Current target: ').concat(h(A.load(e, t.weight, t.reps))).concat(t.manual ? " · MANUAL" : "").concat(where ? h(where) : "", "</p></div>").concat(actions, "</div>");
   };
   A.openReview = () => {
-    const s = A.s(), list = E.outstandingSuggestions(s);
+    const s = A.s();
+    const list = E.outstandingSuggestions(s).sort((a, b) => Number(a.decision === "deferred") - Number(b.decision === "deferred"));
     if (!list.length) {
       A.close();
       A.toast("No recommendations to review. Your decisions are saved.", 4e3);

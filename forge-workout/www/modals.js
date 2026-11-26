@@ -22,7 +22,10 @@ A.recommendationCard=(q,{review=false}={})=>{
   return `<div class="suggestion-row"><div class="grow">${kindBadge(q)} ${decisionBadge(q)}<h4>${h(e.name)} → ${h(A.load(e,q.weight,q.reps))}</h4><p>${h(q.reason)}</p><p class="form-hint">Current target: ${h(A.load(e,t.weight,t.reps))}${t.manual?' · MANUAL':''}${where?h(where):''}</p></div>${actions}</div>`;
 };
 A.openReview=()=>{
-  const s=A.s(),list=E.outstandingSuggestions(s);
+  const s=A.s();
+  // Pending items come first; items you deferred move to the bottom of the review so a
+  // decision is never applied to the row that just moved.
+  const list=E.outstandingSuggestions(s).sort((a,b)=>Number(a.decision==='deferred')-Number(b.decision==='deferred'));
   if(!list.length){A.close();A.toast('No recommendations to review. Your decisions are saved.',4000);return;}
   const rows=list.map(q=>A.recommendationCard(q,{review:true})).join('');
   A.dialog('review','Before you train.',`<p class="intro">${list.length} recommendation${list.length===1?'':'s'} from your last recorded session${list.length===1?'':'s'}. Accept to apply a new target, Reject to keep your current target, or Defer to decide later — nothing changes unless you accept. You can start without deciding.</p>${rows}`,`<button class="btn ghost" data-action="review-defer-all">Defer all</button><button class="btn ghost" data-action="review-dismiss">Close</button><button class="btn primary" data-action="review-start">Start workout ${I('arrow','sm')}</button>`,{},true);

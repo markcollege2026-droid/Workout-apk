@@ -195,17 +195,17 @@ const path=require('node:path');
   expect(reviewOutstanding).toBe(2);
   const beforeDecide=await featurePage.evaluate(()=>{const s=ForgeApp.s();const q=ForgeEngine.outstandingSuggestions(s).map(x=>({id:x.exerciseId,decision:x.decision,source:x.sourceSessionId,target:ForgeEngine.target(s,ForgeEngine.ex(s,x.exerciseId))}));return q;});
   // Defer keeps the item outstanding, unapplied, and listed; it is never regenerated.
-  await featurePage.locator('[data-action="review-defer"]').first().click();
-  const deferredId=beforeDecide[0].id;
-  const afterDefer=await featurePage.evaluate(id=>{const s=ForgeApp.s(),q=s.suggestions[id];return {decision:q.decision,source:q.sourceSessionId,target:ForgeEngine.target(s,ForgeEngine.ex(s,id)),outstanding:ForgeEngine.outstandingSuggestions(s).length};},deferredId);
-  expect(afterDefer.decision).toBe('deferred');
-  expect(afterDefer.source).toBe(beforeDecide[0].source);
-  expect(afterDefer.target.weight).toBe(beforeDecide[0].target.weight);
-  expect(afterDefer.target.reps).toBe(beforeDecide[0].target.reps);
-  expect(afterDefer.outstanding).toBe(2);
+  const deferredId=beforeDecide[0].id,rejectedId=beforeDecide[1].id;
+  await featurePage.locator(`[data-action="review-defer"][data-id="${deferredId}"]`).click();
+  const afterDefer=await featurePage.evaluate(()=>{const s=ForgeApp.s();return Object.fromEntries(ForgeEngine.outstandingSuggestions(s).map(q=>[q.exerciseId,{decision:q.decision,source:q.sourceSessionId,target:ForgeEngine.target(s,ForgeEngine.ex(s,q.exerciseId))}]));});
+  expect(afterDefer[deferredId].decision).toBe('deferred');
+  expect(afterDefer[deferredId].source).toBe(beforeDecide[0].source);
+  expect(afterDefer[deferredId].target.weight).toBe(beforeDecide[0].target.weight);
+  expect(afterDefer[deferredId].target.reps).toBe(beforeDecide[0].target.reps);
+  expect(Object.keys(afterDefer).length).toBe(2);
   await expect(featurePage.locator('#modal-title')).toContainText('Before you train');
   // Only the rejected one leaves the outstanding list.
-  await featurePage.locator('[data-action="review-reject"]').first().click();
+  await featurePage.locator(`[data-action="review-reject"][data-id="${rejectedId}"]`).click();
   const reviewed=await featurePage.evaluate(()=>({outstanding:ForgeEngine.outstandingSuggestions(ForgeApp.s()).map(q=>q.decision).sort(),decisions:Object.values(ForgeApp.s().suggestions).map(q=>q.decision).sort()}));
   expect(reviewed.outstanding).toEqual(['deferred']);
   expect(reviewed.decisions).toEqual(['deferred','rejected']);
