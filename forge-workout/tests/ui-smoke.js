@@ -257,7 +257,7 @@ const path=require('node:path');
   expect(await corruptPage.evaluate(()=>localStorage.getItem('forge.workout.v1'))).toBe('{"version":999}');
   await corruptPage.locator('[data-action="close-modal"]').first().click();
   await corruptPage.locator('[data-action="block-toggle"][data-id="legs"]').click();
-  expect(await corruptPage.evaluate(()=>JSON.parse(localStorage.getItem('forge.workout.v1')).version)).toBe(1);
+  expect(await corruptPage.evaluate(()=>JSON.parse(localStorage.getItem('forge.workout.v1')).version)).toBe(2);
   await corruptPage.close();check('Corrupt saved state warns without silent overwrite and recovers on first change');
   expect(errors).toEqual([]);check('Zero JavaScript page errors');
   fs.writeFileSync('tests/ui-results.json',JSON.stringify({passed:checks.length,checks,errors},null,2));console.log('\n'+checks.length+' UI checks passed.');
